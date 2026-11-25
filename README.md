@@ -19,7 +19,7 @@ the game. Not affiliated with or endorsed by its developer or publisher.
 
 ## Status: measured, not guessed
 
-Machine: Ryzen 9 5950X, GeForce RTX 3080 Ti (12 GB), 32 GB RAM, Windows 11.
+Machine: Ryzen 9 9950X3D, GeForce RTX 3080 Ti (12 GB), 32 GB RAM, Windows 11.
 
 | | before this branch | after |
 |---|---|---|
