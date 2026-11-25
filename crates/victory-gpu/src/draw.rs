@@ -413,6 +413,35 @@ pub(crate) static HEAP_TEXTURES_RECHECKED: [AtomicU64; 2] = [AtomicU64::new(0), 
 /// new ones, since the start.
 pub(crate) static HEAP_TEXTURES_REUPLOADED_FULL: AtomicU64 = AtomicU64::new(0);
 
+/// The spans of title memory (start, end) the uploads for shaders that
+/// pick textures by index have taken at least once, since the start: the
+/// frame line's `reuploaded=` is what was sent up of a span sent up
+/// before, which is the memory paid for twice or more. The key is the
+/// placed texture's span at full size, so a texture streamed in over many
+/// frames (its view written again as pages arrive) stays one span and its
+/// uploads count as re-uploads; a texture whose memory went and was
+/// given to another of the same size counts as the same span (see
+/// `same_view`, which tells those apart).
+/// `VICTORY_TEXTURE_SPANS=0` keeps no record (the counters stay 0).
+static UPLOADED_SPANS: std::sync::Mutex<Option<std::collections::HashSet<(u64, u64)>>> =
+    std::sync::Mutex::new(None);
+
+/// Whether the spans are recorded (`VICTORY_TEXTURE_SPANS=0`: no).
+fn span_census() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_SPANS").is_none_or(|v| v != "0"))
+}
+
+/// Since the start: different spans of title memory uploaded (each
+/// counted once); uploads of a span uploaded before, and their bytes;
+/// uploads of a view the host slot already showed (the same texture
+/// brought up to date again, its bytes moved or not), and their bytes.
+pub(crate) static HEAP_TEXTURE_SPANS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static HEAP_TEXTURES_AGAIN: AtomicU64 = AtomicU64::new(0);
+pub(crate) static HEAP_TEXTURE_AGAIN_BYTES: AtomicU64 = AtomicU64::new(0);
+pub(crate) static HEAP_TEXTURES_SAME_VIEW: AtomicU64 = AtomicU64::new(0);
+pub(crate) static HEAP_TEXTURE_SAME_VIEW_BYTES: AtomicU64 = AtomicU64::new(0);
+
 /// Whether a pass over the textures picked by index on a full card holds
 /// back the slots that need a new host copy (`VICTORY_FULL_CARD_PASS=0`:
 /// no, as before: they stay due, each pass looks at the same ones again
@@ -1917,10 +1946,14 @@ impl State {
                     );
                 }
             }
+            // Where an upload's bytes lie: the placed texture's span at full
+            // size (a texture object's memory is no span of the title's).
+            let mut span = None;
             let mut partly = None;
             if let Some(View::Placed(false, resource, desc)) = heap.handle(index).and_then(crate::descriptor::view) {
                 let address = u64::from(desc[10]) | u64::from(desc[11]) << 32;
                 let len = crate::resource::placed_bytes(&resource).unwrap_or(1);
+                span = Some((address, address.saturating_add(len)));
                 let mapped = crate::texture::mapped_bytes(address as *const u8, len as usize);
                 if mapped == 0 {
                     HEAP_TEXTURES_AWAY.fetch_add(1, Ordering::Relaxed);
@@ -1952,6 +1985,16 @@ impl State {
                 host.texture_slot_done(index, write, None);
                 continue;
             }
+            // The slot already shows the very view the title has there: an
+            // upload now brings back a texture that is on the card already
+            // (the frame line's `same_view`), and under `reupload_when_full`
+            // the same answer says the upload needs no room (below). Asked
+            // only where the answer is used: it takes two of the heap's
+            // locks, and the pass walks thousands of due slots a frame.
+            let same_view = || {
+                heap.handle(index)
+                    .is_some_and(|handle| host.texture_slot_made_from(index, handle))
+            };
             // From here on a host texture is made: not without room. The
             // slot stays due.
             // Not so a slot already made from this very view: its host
@@ -1966,8 +2009,7 @@ impl State {
             // under the line. `VICTORY_REUPLOAD_WHEN_FULL=0`: refused, as
             // before.
             if !room {
-                let has_its_texture = reupload_when_full()
-                    && heap.handle(index).is_some_and(|handle| host.texture_slot_made_from(index, handle));
+                let has_its_texture = reupload_when_full() && same_view();
                 if !has_its_texture {
                     refused += 1;
                     if full_card_pass() {
@@ -2065,6 +2107,27 @@ impl State {
             }
             HEAP_TEXTURE_BYTES.fetch_add(bytes, Ordering::Relaxed);
             HEAP_TEXTURES.fetch_add(1, Ordering::Relaxed);
+            // The frame line's `reuploaded=`: of the bytes just sent up, those
+            // of a span that was sent up before (`VICTORY_TEXTURE_SPANS=0`:
+            // not counted).
+            if span_census()
+                && let Some(key) = span
+            {
+                let first = {
+                    let mut spans = UPLOADED_SPANS.lock().unwrap_or_else(|e| e.into_inner());
+                    spans.get_or_insert_with(Default::default).insert(key)
+                };
+                if first {
+                    HEAP_TEXTURE_SPANS.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    HEAP_TEXTURES_AGAIN.fetch_add(1, Ordering::Relaxed);
+                    HEAP_TEXTURE_AGAIN_BYTES.fetch_add(bytes, Ordering::Relaxed);
+                }
+            }
+            if same_view() {
+                HEAP_TEXTURES_SAME_VIEW.fetch_add(1, Ordering::Relaxed);
+                HEAP_TEXTURE_SAME_VIEW_BYTES.fetch_add(bytes, Ordering::Relaxed);
+            }
             match memory {
                 // Whole and uploaded: looked at again (see above).
                 Some((at, len)) => {
