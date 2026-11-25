@@ -140,19 +140,55 @@ const _: () = assert!(offset_of!(List, put) == 0x18);
 const _: () = assert!(offset_of!(List, pipeline_shadow) + 32 == 0x560);
 
 /// Runs `f` with the host list and draw state of a title list, if there
-/// is a host GPU.
+/// is a host GPU. What a run of indirect calls asked for and has not drawn
+/// yet is drawn first ([`crate::draw::State::flush_indirect`]): `f` is about
+/// to record something else into the list, and the run's records must come
+/// before it.
 #[cfg(windows)]
 fn with_state(this: This, f: impl FnOnce(&crate::host::HostList, &mut crate::draw::State)) {
+    with_state_kind(this, true, f);
+}
+
+/// [`with_state`] for the indirect call itself: it adds to a run of records
+/// or starts one, so it must not flush ([`crate::draw::State::execute_indirect`]).
+#[cfg(windows)]
+fn with_indirect_state(this: This, f: impl FnOnce(&crate::host::HostList, &mut crate::draw::State)) {
+    with_state_kind(this, false, f);
+}
+
+#[cfg(windows)]
+fn with_state_kind(
+    this: This,
+    flush: bool,
+    f: impl FnOnce(&crate::host::HostList, &mut crate::draw::State),
+) {
     let Some(list) = host_list(this) else { return };
     #[cfg(feature = "diagnostics")]
     let started = std::time::Instant::now();
     // SAFETY: the title passes one of our lists.
     let state = unsafe { &(*this.cast::<List>()).state };
-    f(list, &mut state.lock().unwrap_or_else(|e| e.into_inner()));
+    {
+        let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+        if flush {
+            state.flush_indirect(list);
+        }
+        f(list, &mut state);
+    }
     #[cfg(feature = "diagnostics")]
     crate::copystat::recorded(started);
     #[cfg(feature = "diagnostics")]
     crate::profile::seen(crate::profile::Seen::Record);
+}
+
+/// [`crate::draw::State::flush_indirect`] for the commands that record
+/// without the draw state: copies, barriers, clears, read-backs, and the
+/// list's close.
+#[cfg(windows)]
+fn flush_indirect(this: This) {
+    let Some(list) = host_list(this) else { return };
+    // SAFETY: the title passes one of our lists.
+    let state = unsafe { &(*this.cast::<List>()).state };
+    state.lock().unwrap_or_else(|e| e.into_inner()).flush_indirect(list);
 }
 
 /// The submission of `lists` has run: each gives its descriptor tables'
@@ -309,6 +345,11 @@ fn cut(this: This, wait: ValueWait) {
     }
     // SAFETY: the title passes one of our lists; a list is recorded by one
     // thread at a time and is not submitted while it records.
+    // The indirect records asked for so far are drawn before this list is
+    // closed: a wait cuts it, and the new list must not draw them.
+    flush_indirect(this);
+    // SAFETY: the title passes one of our lists; a list is recorded by one
+    // thread at a time and is not submitted while it records.
     let list = unsafe { &mut *this.cast_mut().cast::<List>() };
     let Some(current) = list.host.as_ref() else {
         return;
@@ -382,6 +423,8 @@ pub(crate) fn detach_parts(lists: &[This]) -> Parts {
         if this.is_null() {
             continue;
         }
+        #[cfg(windows)]
+        flush_indirect(this);
         if let Some(&(_, at)) = seen.iter().find(|(t, _)| *t == this) {
             match at {
                 Some((entry, place)) if entry + 1 == parts.len() => parts[entry].2.push(place),
@@ -462,6 +505,8 @@ pub(crate) fn detach(lists: &[This]) -> (Vec<Detached>, Vec<usize>) {
         if this.is_null() {
             continue;
         }
+        #[cfg(windows)]
+        flush_indirect(this);
         if let Some(i) = taken.iter().position(|(t, _)| *t == this) {
             order.push(i);
             continue;
@@ -746,6 +791,8 @@ const UAV_BARRIER: Barrier = Barrier {
 /// Returns the console's barrier "actions" (none).
 extern "system" fn barrier(this: This, count: u32, barriers: *const Barrier) -> u32 {
     #[cfg(windows)]
+    flush_indirect(this);
+    #[cfg(windows)]
     if let Some(list) = host_list(this)
         && !barriers.is_null()
     {
@@ -821,6 +868,8 @@ extern "system" fn copy_buffer_region(
     src_offset: u64,
     len: u64,
 ) {
+    #[cfg(windows)]
+    flush_indirect(this);
     #[cfg(windows)]
     if let Some(list) = host_list(this)
         && let Some(to) = buffer_range(dst, dst_offset, len)
@@ -943,6 +992,8 @@ extern "system" fn copy_texture_region(
     src: *const CopyLocation,
     source_box: *const [u32; 6],
 ) {
+    #[cfg(windows)]
+    flush_indirect(this);
     #[cfg(windows)]
     {
         use windows::Win32::Graphics::Direct3D12::{D3D12_BOX, D3D12_TEXTURE_COPY_LOCATION};
@@ -1262,6 +1313,8 @@ extern "system" fn clear_rtv(
     rects: *const Rect,
 ) {
     #[cfg(windows)]
+    flush_indirect(this);
+    #[cfg(windows)]
     {
         let (Some(list), Some(record)) = (host_list(this), crate::descriptor::rtv_record(handle))
         else {
@@ -1311,6 +1364,8 @@ extern "system" fn clear_dsv(
     count: u32,
     rects: *const Rect,
 ) {
+    #[cfg(windows)]
+    flush_indirect(this);
     #[cfg(windows)]
     {
         use windows::Win32::Graphics::Direct3D12::D3D12_CLEAR_FLAGS;
@@ -1757,7 +1812,7 @@ extern "system" fn execute_indirect(
         const DISPATCH: u32 = 2;
         const DISPATCH_SINGLE: u32 = 105;
         let kind = if *kind == DISPATCH_SINGLE { DISPATCH } else { *kind };
-        with_state(this, |list, s| {
+        with_indirect_state(this, |list, s| {
             ran = s.execute_indirect(list, (kind, stride, max), address, counter);
         });
     } else {

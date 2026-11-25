@@ -190,6 +190,41 @@ fn windows() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_INDIRECT_WINDOW").is_some_and(|v| v == "1")) && !crate::drvwatch::tripped()
 }
 
+/// Whether the records of an indirect window that the title asks for one at
+/// a time are drawn in one `ExecuteIndirect` when the run of calls ends
+/// (`VICTORY_INDIRECT_MERGE=1`; off by default, and only with
+/// [`windows`], which is what fills the scratch buffer these records lie in).
+///
+/// The price it goes for: a one-record `ExecuteIndirect` costs 8.4-10 us of
+/// the card where a plain draw costs 1.36 us, and the world issues 2 000-2 700
+/// of them a frame (53.2 ms of a 98.6 ms GPU with the windows off, 18.4 ms
+/// with them on - section 34 of the notes). A run of them, drawn as one
+/// command with `max = records`, is one command's price for all of it.
+///
+/// What makes it exact: every setter and every draw records through
+/// `with_state`, and every other command (copies, barriers, clears, the
+/// list's close) through the calls that flush it first - so no state can
+/// change, and no other command can be ordered between the records of a run,
+/// without the run being drawn first. A record the title asks for that does
+/// not continue the run (a gap in the walk, another window) flushes it too.
+fn indirect_merge() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_INDIRECT_MERGE").is_some_and(|v| v == "1"))
+}
+
+/// The records of one window a run of the title's calls has asked for, not
+/// drawn yet: where they lie in the scratch buffer, how far apart, and how
+/// many ([`indirect_merge`]).
+struct Pending {
+    scratch: ID3D12Resource,
+    signature: ID3D12CommandSignature,
+    /// Offset of the run's first record in the scratch, and the step between
+    /// records (the window's).
+    first: u64,
+    step: u32,
+    count: u32,
+}
+
 /// What one title list has set, and what its host list was last given.
 #[derive(Default)]
 pub(crate) struct State {
@@ -225,6 +260,9 @@ pub(crate) struct State {
     /// The indirect records clamped last, if later draws may still read
     /// them ([`windows`]).
     window: Option<Window>,
+    /// The window's records the title has asked for and that are not drawn
+    /// yet ([`indirect_merge`]): one `ExecuteIndirect` for the run.
+    pending: Option<Pending>,
     /// What the host list has: pipeline, root signature, heaps.
     host_pipeline: usize,
     /// Graphics, compute.
@@ -256,6 +294,23 @@ impl Drop for State {
 }
 
 impl State {
+    /// Draws the records of a run of indirect calls that the title has asked
+    /// for and are not drawn yet, as one `ExecuteIndirect`
+    /// ([`indirect_merge`]). Called before anything else is recorded into the
+    /// list and before it closes: a run's records are drawn with the state of
+    /// its first call, so nothing may change while it is pending.
+    pub(crate) fn flush_indirect(&mut self, list: &HostList) {
+        let Some(p) = self.pending.take() else { return };
+        if p.count == 0 {
+            return;
+        }
+        // SAFETY: an open list with everything set (the state of the run's
+        // first call, unchanged since); the scratch buffer is held by the
+        // window's list, and one flight's worth of records is in it.
+        unsafe { list.list.ExecuteIndirect(&p.signature, p.count, &p.scratch, p.first, None, 0) };
+        DRAWN.fetch_add(u64::from(p.count), Ordering::Relaxed);
+    }
+
     /// The list's submission has run (submissions are waited for): the
     /// dynamic slots its tables were made in are given back, not kept
     /// until the title resets the list. A frame of the opening cutscene
@@ -3271,6 +3326,37 @@ impl State {
         });
         if kind == MESH {
             self.mesh_scissor(list, true);
+        }
+        // One `ExecuteIndirect` for a run of the window's records
+        // (`VICTORY_INDIRECT_MERGE=1`): the draw of this record waits until the
+        // run ends - any other command recorded into the list flushes it, and
+        // so does the list's close - and the calls that continue the run only
+        // add to its count. Nothing may change the state between them: every
+        // setter and every draw records through `with_state`, which flushes
+        // first, so a run cannot span a state change. A counted call is not
+        // merged (the count lives in a buffer the card reads).
+        if indirect_merge() && counter.is_none() && max == 1 {
+            let step = u64::from(self.window.as_ref().map_or(stride, |w| w.step));
+            let continues = self.pending.as_ref().is_some_and(|p| {
+                std::ptr::eq(&*p.scratch, &*bounded)
+                    && u64::from(p.step) == step
+                    && at == p.first + u64::from(p.count) * step
+            });
+            if continues {
+                if let Some(p) = self.pending.as_mut() {
+                    p.count += 1;
+                }
+                return true;
+            }
+            self.flush_indirect(list);
+            self.pending = Some(Pending {
+                scratch: bounded.clone(),
+                signature: signature.clone(),
+                first: at,
+                step: step as u32,
+                count: 1,
+            });
+            return true;
         }
         // SAFETY: an open list with everything set; the scratch buffer and
         // host copies are kept alive by the list, and the signature is cached.
