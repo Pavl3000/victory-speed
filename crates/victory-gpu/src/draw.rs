@@ -341,6 +341,22 @@ pub(crate) fn drawn() -> u64 {
     DRAWN.load(Ordering::Relaxed)
 }
 
+/// Pixels the draws ask the card for, summed over their viewports, since the
+/// start. A 4K target is 8.3 megapixels: a frame whose draws ask for a
+/// hundred times that is the same screen shaded a hundred times over, and the
+/// card is neither idle nor slow - it is being given the work again and again.
+static ASKED: AtomicU64 = AtomicU64::new(0);
+
+/// Notes a draw's asked-for pixels.
+pub(crate) fn asked(pixels: u64) {
+    ASKED.fetch_add(pixels, Ordering::Relaxed);
+}
+
+/// The pixels asked for so far.
+pub(crate) fn asked_total() -> u64 {
+    ASKED.load(Ordering::Relaxed)
+}
+
 /// The draws traced since the last present (diagnostics builds, with
 /// debug logging for this module): logged when the frame comes out black.
 #[cfg(feature = "diagnostics")]
@@ -2764,6 +2780,21 @@ impl State {
         out
     }
 
+    /// The pixels this draw asks for: the viewports' areas, cut down by the
+    /// scissors when the title set them (the scissor is what the rasteriser is
+    /// allowed to touch, so it is the tighter of the two).
+    fn asked_pixels(&self) -> u64 {
+        let mut total = 0;
+        for (i, v) in self.viewports.iter().enumerate() {
+            let viewport = (v.Width.max(0.0) as u64) * (v.Height.max(0.0) as u64);
+            let scissor = self.scissors.get(i).map(|s| {
+                ((s.right - s.left).max(0) as u64) * ((s.bottom - s.top).max(0) as u64)
+            });
+            total += scissor.map_or(viewport, |s| s.min(viewport));
+        }
+        total
+    }
+
     pub(crate) fn draw(
         &mut self,
         list: &HostList,
@@ -2773,6 +2804,7 @@ impl State {
         first_instance: u32,
     ) {
         self.window = None;
+        crate::draw::asked(self.asked_pixels());
         #[cfg(feature = "diagnostics")]
         self.trace("draw", vertices, first);
         let ready = self.prepare(list, false);
@@ -2878,6 +2910,7 @@ impl State {
         first_instance: u32,
     ) {
         self.window = None;
+        crate::draw::asked(self.asked_pixels());
         #[cfg(feature = "diagnostics")]
         self.trace("indexed", indices, first);
         // Indexed rectangles are drawn by the rectangle geometry stage

@@ -1096,6 +1096,17 @@ fn present_now(this: This, planes: u32, plane_parameters: *const Plane) -> HRESU
         };
         #[cfg(not(windows))]
         let (drawn, dispatched) = (0, 0);
+        // The pixels the draws asked for since the last line, in megapixels: a
+        // 4K target is 8.3, so a frame asking for hundreds of megapixels shades
+        // the same screen over and over.
+        #[cfg(windows)]
+        let asked_mpx = {
+            static ASKED: AtomicU64 = AtomicU64::new(0);
+            let now = crate::draw::asked_total();
+            (now - ASKED.swap(now, Ordering::Relaxed)) as f64 / 1e6
+        };
+        #[cfg(not(windows))]
+        let asked_mpx = 0.0;
         tracing::info!(
             frame,
             draws,
@@ -1104,6 +1115,7 @@ fn present_now(this: This, planes: u32, plane_parameters: *const Plane) -> HRESU
             dispatched,
             barriers = barriers,
             rebinds = rebinds,
+            asked_mpx,
             "frame presented (since the last line: draws and dispatches, and those run on the host)"
         );
         #[cfg(windows)]
