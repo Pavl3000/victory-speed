@@ -1950,6 +1950,12 @@ struct Deferred {
     /// descriptor heaps): the title may release its objects before it
     /// submits the list.
     kept: Vec<windows::core::IUnknown>,
+    /// The interface pointers in `kept`: `HostList::keep` is called on every
+    /// heap bind and every texture that goes through a staging buffer, so
+    /// without this the same object was kept - `AddRef`ed - thousands of
+    /// times a list, and released as many times when the list was reset
+    /// (17.3 ms of a frame's resets, section 41).
+    kept_seen: std::collections::HashSet<usize>,
     /// Buffer ranges refreshed since the last title copy (host copy,
     /// address, bytes): refreshing them again would find the same bytes.
     refreshed: std::collections::HashSet<(usize, usize, usize)>,
@@ -1998,6 +2004,7 @@ impl Deferred {
         self.upload_bytes = 0;
         self.copies.clear();
         self.kept.clear();
+        self.kept_seen.clear();
         self.refreshed.clear();
         self.textures.clear();
         self.writes.clear();
@@ -6846,10 +6853,19 @@ impl HostList {
         self.window_check.get_or_init(crate::indirect::WindowCheck::new).as_ref()
     }
 
-    /// Keeps `object` alive until the list is reset.
+    /// Keeps `object` alive until the list is reset. The same object is kept
+    /// once: the callers keep the heaps on every heap bind and the staging
+    /// buffer of every texture that goes through one, and a run of thousands
+    /// of keeps of one object was thousands of `AddRef`s and as many
+    /// `Release`s at the reset.
     pub(crate) fn keep(&self, object: &impl Interface) {
+        let key = object.as_raw() as usize;
+        let mut deferred = self.deferred();
+        if !deferred.kept_seen.insert(key) {
+            return;
+        }
         if let Ok(object) = object.cast::<windows::core::IUnknown>() {
-            self.deferred().kept.push(object);
+            deferred.kept.push(object);
         }
     }
 
