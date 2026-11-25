@@ -3337,15 +3337,24 @@ struct Entry {
 }
 
 /// Title buffers by (start address, resource), with their copy once made.
-static BUFFERS: Mutex<BTreeMap<(u64, usize), Entry>> = Mutex::new(BTreeMap::new());
+///
+/// A reader-writer lock: the recording threads look buffers up on every draw
+/// and almost always find a copy that is already made, so those looks run in
+/// parallel. Only a copy that has to be made takes the lock for writing.
+static BUFFERS: std::sync::RwLock<BTreeMap<(u64, usize), Entry>> =
+    std::sync::RwLock::new(BTreeMap::new());
 
-fn buffers() -> std::sync::MutexGuard<'static, BTreeMap<(u64, usize), Entry>> {
-    BUFFERS.lock().unwrap_or_else(|e| e.into_inner())
+fn buffers() -> std::sync::RwLockReadGuard<'static, BTreeMap<(u64, usize), Entry>> {
+    BUFFERS.read().unwrap_or_else(|e| e.into_inner())
+}
+
+fn buffers_mut() -> std::sync::RwLockWriteGuard<'static, BTreeMap<(u64, usize), Entry>> {
+    BUFFERS.write().unwrap_or_else(|e| e.into_inner())
 }
 
 /// A title buffer exists at `start` (`len` bytes).
 pub(crate) fn register(resource: usize, start: u64, len: u64) {
-    buffers().insert(
+    buffers_mut().insert(
         (start, resource),
         Entry {
             end: start + len,
@@ -3356,7 +3365,7 @@ pub(crate) fn register(resource: usize, start: u64, len: u64) {
 
 /// The title released it; lists that still hold its copy keep it alive.
 pub(crate) fn unregister(resource: usize, start: u64) {
-    buffers().remove(&(start, resource));
+    buffers_mut().remove(&(start, resource));
 }
 
 /// The title buffer holding `address`, as (start, length), without making
@@ -3389,7 +3398,7 @@ pub(crate) fn in_place_let_go(at: u64, len: u64) -> u64 {
     }
     {
         // As `lookup` finds a buffer: among the 256 that start below.
-        let mut map = buffers();
+        let mut map = buffers_mut();
         for (_, entry) in map.range_mut(..(end, 0)).rev().take(256) {
             if entry.end > at && entry.shadow.as_ref().is_some_and(|s| s.place.is_some()) {
                 gone.extend(entry.shadow.take());
@@ -3447,17 +3456,30 @@ pub(crate) fn find_any(address: u64, len: u64) -> Option<Arc<Shadow>> {
 
 fn lookup(address: u64, len: u64, any: bool) -> Option<Arc<Shadow>> {
     let end = address.checked_add(len.max(1))?;
-    let mut map = buffers();
-    let key = map
-        .range(..=(address, usize::MAX))
-        .rev()
-        .take(64)
-        .find(|(_, e)| e.end >= end)
-        .map(|(k, _)| *k);
+    // The buffer whose copy this draw would use, found under the shared lock:
+    // the recording threads look a buffer up on every draw and nearly always
+    // find a copy that is already made, so these looks must not queue behind
+    // each other (six recording threads took the same lock for every draw
+    // before: `RtlWaitOnAddress` was 42 ms a frame in the profile).
+    let key = {
+        let map = buffers();
+        map.range(..=(address, usize::MAX))
+            .rev()
+            .take(64)
+            .find(|(_, e)| e.end >= end)
+            .map(|(k, _)| *k)
+    };
     let Some(key) = key else {
-        drop(map);
         return loose(address, end, len <= 1, any);
     };
+    // The common case: a copy that is already there. `Arc::clone` under the
+    // shared lock, and nothing is written.
+    if let Some(made) = buffers().get(&key).and_then(|e| e.shadow.clone()) {
+        return Some(made);
+    }
+    // Making the copy takes the lock for writing; a look again, since another
+    // thread may have made it while this one waited.
+    let mut map = buffers_mut();
     let entry = map.get_mut(&key)?;
     if entry.shadow.is_none() {
         let len = entry.end - key.0;
