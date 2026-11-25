@@ -1922,6 +1922,46 @@ impl Drop for Deferred {
 /// its submissions, without waiting for the first, may be seen by the
 /// first's shaders (as on the console, where the card reads title memory
 /// when it runs, not when the list is submitted).
+/// `VICTORY_VRS`: the coarse shading rate set on every list (1x2, 2x1, 2x2,
+/// 2x4, 4x2, 4x4), if the host runs variable rate shading. Off by default.
+///
+/// Why it is here: the title is a locked console build that renders at
+/// 3840x2160 and has no graphics options, the frame is bound by its pixel
+/// shaders (94% of the card busy, 36 us of GPU a draw), and the layer cannot
+/// change what the title renders into. A coarser shading rate cuts the
+/// number of pixel shader invocations without touching the render targets.
+pub(crate) fn vrs_rate() -> Option<D3D12_SHADING_RATE> {
+    static RATE: OnceLock<Option<D3D12_SHADING_RATE>> = OnceLock::new();
+    *RATE.get_or_init(|| {
+        let asked = std::env::var("VICTORY_VRS").ok()?;
+        let rate = match asked.trim().to_ascii_lowercase().as_str() {
+            "1x2" => D3D12_SHADING_RATE_1X2,
+            "2x1" => D3D12_SHADING_RATE_2X1,
+            "2x2" => D3D12_SHADING_RATE_2X2,
+            "2x4" => D3D12_SHADING_RATE_2X4,
+            "4x2" => D3D12_SHADING_RATE_4X2,
+            "4x4" => D3D12_SHADING_RATE_4X4,
+            _ => return None,
+        };
+        let host = host()?;
+        let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS6::default();
+        // SAFETY: a plain feature query with a valid out pointer.
+        let asked_ok = unsafe {
+            host.device.CheckFeatureSupport(
+                D3D12_FEATURE_D3D12_OPTIONS6,
+                (&raw mut options).cast(),
+                size_of_val(&options) as u32,
+            )
+        };
+        if asked_ok.is_err() || options.VariableShadingRateTier == D3D12_VARIABLE_SHADING_RATE_TIER_NOT_SUPPORTED {
+            tracing::warn!("VICTORY_VRS asked for, but the host has no variable rate shading: ignored");
+            return None;
+        }
+        tracing::info!(rate = asked.trim(), "the coarse shading rate is set on every list (VICTORY_VRS)");
+        Some(rate)
+    })
+}
+
 pub(crate) fn late() -> bool {
     late_stage() > 0
 }

@@ -203,6 +203,8 @@ pub(crate) struct State {
     depth_state: u32,
     /// The title's primitive topology (the host's may differ).
     topology: u32,
+    /// Whether the coarse shading rate (`VICTORY_VRS`) was set on this list.
+    vrs: bool,
     /// What the title set that goes straight onto the host list, kept for
     /// the host list that continues this one after a cut ([`State::replay`]):
     /// whether a topology was set, the render target and depth handles, the
@@ -943,6 +945,27 @@ impl State {
     /// could not be given a view.
     pub(crate) fn bind(&mut self, list: &HostList, p: &HostPipeline, compute: bool) -> bool {
         let l = &list.list;
+        // `VICTORY_VRS=2x2` (and 1x2, 2x1, 2x4, 4x2, 4x4): the coarse shading
+        // rate is set on the list once, so every draw of it shades at that
+        // rate. The console build has no graphics options and renders at
+        // 3840x2160 whatever the host is told, and the frame is bound by the
+        // pixel shaders (an instrumented run: 94% of the card busy, 36 us of
+        // GPU a draw, and the frame time does not follow the draw count), so
+        // a coarser rate is the one lever that cuts that work without
+        // changing what the title renders into.
+        if !self.vrs
+            && let Some(rate) = crate::host::vrs_rate()
+        {
+            if let Ok(coarse) = windows::core::Interface::cast::<
+                windows::Win32::Graphics::Direct3D12::ID3D12GraphicsCommandList5,
+            >(l)
+            {
+                // SAFETY: an open list; no combiners means the base rate for
+                // every primitive.
+                unsafe { coarse.RSSetShadingRate(rate, None) };
+            }
+            self.vrs = true;
+        }
         // Textures picked by index, before anything asks for them.
         self.early_textures(list, p, compute);
         if crate::host::walls_trace() {
