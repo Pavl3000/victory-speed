@@ -4492,7 +4492,7 @@ impl<'a> Lower<'a> {
                 self.s.m.bin(c, Bin::Xor, t, xor)
             };
             let r = if quad && (self.s.pixel || self.s.mesh.is_some()) {
-                self.quad_pick(x, src, None)
+                self.quad_pick(x, src, (offset & 0x8000 != 0).then_some(offset as u8))
             } else {
                 self.read_lane(x, src)
             };
@@ -6846,7 +6846,11 @@ impl<'a> Lower<'a> {
             }
         };
         let mut r = if quad && (self.s.pixel || self.s.mesh.is_some()) {
-            self.quad_pick(x, src, None)
+            let pattern = match dpp {
+                Dpp::Row { ctrl, .. } => Some(ctrl as u8),
+                Dpp::Lanes { .. } => None,
+            };
+            self.quad_pick(x, src, pattern)
         } else {
             self.read_lane(x, src)
         };
