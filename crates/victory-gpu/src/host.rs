@@ -7335,6 +7335,23 @@ pub(crate) fn write_mapped(dst: *mut u8, src: *const u8, len: usize) {
     if len == 0 || write(dst as usize, len) {
         return;
     }
+    // A page of the range will not take a kernel write (a guard of ours, or a
+    // page not committed). The kernel route below drills from 64 KiB pieces to
+    // 4 KiB pages, and a page a call is 8.6 us: 14 437 pages a frame was 124 ms
+    // (section 26). Opening a piece and copying it with the processor is a
+    // microsecond's work for the same bytes, so that comes first.
+    if open_copies() {
+        let base = dst as usize;
+        let mut done = true;
+        for_pieces(base, len, 64 << 10, |at, n| {
+            if !open_and_copy(at, n, src, base) {
+                done = false;
+            }
+        });
+        if done {
+            return;
+        }
+    }
     for_pieces(dst as usize, len, 64 << 10, |at, n| {
         if !write(at, n) {
             for_pieces(at, n, 4 << 10, |at, n| {
@@ -7342,6 +7359,51 @@ pub(crate) fn write_mapped(dst: *mut u8, src: *const u8, len: usize) {
             });
         }
     });
+}
+
+/// Whether a stretch that will not take one kernel write is opened and copied
+/// instead (`VICTORY_OPEN_COPIES=0` keeps the kernel-only path).
+fn open_copies() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_OPEN_COPIES").is_none_or(|v| v != "0"))
+}
+
+/// Opens `[at, at + n)` for writing, copies `n` bytes from `src` into it, and
+/// puts the protection back. `false` when the range is not one committed region
+/// (mixed protections, which opening whole would change) or would not open, and
+/// the caller then takes the kernel's route.
+fn open_and_copy(at: usize, n: usize, src: *const u8, base: usize) -> bool {
+    use windows_sys::Win32::System::Memory::{
+        MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_READWRITE, VirtualProtect, VirtualQuery,
+    };
+    let mut info = MEMORY_BASIC_INFORMATION::default();
+    // SAFETY: plain data filled in by the query.
+    let asked = unsafe {
+        VirtualQuery(
+            at as *const _,
+            &mut info,
+            std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+        )
+    };
+    // One protection over the whole piece is what makes putting it back exact;
+    // a piece that is not there at all is left alone, as the kernel route does.
+    if asked == 0 || info.State != MEM_COMMIT || (info.RegionSize as usize) < n {
+        return false;
+    }
+    let mut old = 0u32;
+    // SAFETY: our own process's range, of `n` bytes, whose protection is one
+    // thing (asked above) and is put back below.
+    if unsafe { VirtualProtect(at as *const _, n, PAGE_READWRITE, &mut old) } == 0 {
+        return false;
+    }
+    let from = src.wrapping_add(at - base);
+    // SAFETY: the range is writable now, `n` bytes of it, and the source is our
+    // own copy, `n` bytes at that offset.
+    unsafe { std::ptr::copy_nonoverlapping(from, at as *mut u8, n) };
+    let mut back = 0u32;
+    // SAFETY: putting back what the call above reported.
+    unsafe { VirtualProtect(at as *const _, n, old, &mut back) };
+    true
 }
 
 /// Calls `f` with the pieces of `[start, start + len)` cut at multiples of
