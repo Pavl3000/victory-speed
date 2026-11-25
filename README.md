@@ -1,4 +1,4 @@
-# victory-fps-lab
+# Victory - speed
 
 **Frames per second, and nothing else.** This is a fork of
 [ztrx](https://github.com/Zettrox/ztrx) (which is [VIctory](https://github.com/Marvisak/VIctory)
