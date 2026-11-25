@@ -20,6 +20,10 @@ Tested on Windows 11 with an **NVIDIA GeForce RTX 3050** (8 GB):
 
 ## This branch: `merge/nvidia`
 
+fxceless's third session (`a253706`, `0b0074e`) is merged as well: a frame log and a card meter, a driver watch, copies in place measured and fixed, our threads on the fast cores, a forbidden self-copy removed, and draw windows measured again.
+
+The branch `merge/fxceless-latest` carries that on top.
+
 `merge/nvidia` is **ztrx plus the frame-rate work of
 [fxceless/victory-fork](https://github.com/fxceless/victory-fork)**, merged
 from `fxceless/main` at `f85101b` (2026-11-25). The two forks share the same
