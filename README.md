@@ -1,80 +1,100 @@
-# ztrx
+# victory-fps-lab
 
-**ztrx** runs the Xbox Series build of the game natively on Windows PCs with
-NVIDIA graphics cards, from game files you supply yourself.
+**Frames per second, and nothing else.** This is a fork of
+[ztrx](https://github.com/Zettrox/ztrx) (which is [VIctory](https://github.com/Marvisak/VIctory)
+plus [fxceless](https://github.com/fxceless/victory-fork)'s frame-rate work)
+for running the Xbox Series build of *that* game natively on Windows through a
+high-level-emulation layer: the game's x86-64 code runs natively, its console
+APIs are replaced, its GFX10 shaders are translated to DXIL, and D3D12 is the
+back end.
 
-**This repository contains no game files or assets.** You need your own copy
-of the game. Not affiliated with or endorsed by its developer or publisher.
+The goal of this branch is the highest frame rate that can be reached.
+Correctness bugs are out of scope **unless they cost frames** - there are
+several known ones and they are left alone on purpose. Every change that
+touches behaviour has an environment switch, so it can be turned off without a
+rebuild.
 
-## Status (2026-11-25)
+**This repository contains no game files or assets.** You need your own copy of
+the game. Not affiliated with or endorsed by its developer or publisher.
 
-Tested on Windows 11 with an **NVIDIA GeForce RTX 3050** (8 GB):
+## Status: measured, not guessed
 
-| | |
-|---|---|
-| Boot, first-boot screens, intro, opening credits | works |
-| Prologue | playable from the cell to the boat chase: cell, cafeteria, robbery, police chase (wanted level, minimap), boat, binoculars |
-| Stability | 1 h 30 min+ in one session without a crash |
-| Frame rate | 1-3 fps in the world (the first run is slower while shaders translate; they are cached after that) |
-| Known problems | anything in shadow is black and bright scenes overexpose (the game's ray-traced lighting does not run yet); some blocky artifacts; boats sit low in the water |
+Machine: Ryzen 9 5950X, Radeon RX 9070 XT (16 GB), 32 GB RAM, Windows 11.
 
-## This branch: `merge/nvidia`
+| | before this branch | after |
+|---|---|---|
+| Opening cutscene (about 1 300 draws a frame) | 5.1 fps, 196 ms | **8-10 fps, 101-129 ms** |
+| The same, on the card | 99 ms | **29 ms** |
+| A heavier spot (4 900 draws a frame) | - | 5.7 fps, 176 ms, of which 110 ms is the card |
+| Textures picked by index, a frame | 250 MB, pass 246-420 ms | 29.5 MB, pass 32 ms |
+| Writes back into title memory, a frame | 250 236 kernel calls | **167** |
+| Our clamps of indirect arguments, a frame | 501 | **46** |
+| The relay's wait for fetched pieces | 73-272 ms a frame | **0.0** |
 
-fxceless's third session (`a253706`, `0b0074e`) is merged as well: a frame log and a card meter, a driver watch, copies in place measured and fixed, our threads on the fast cores, a forbidden self-copy removed, and draw windows measured again.
+The number that decides everything else: the card's own time. In the cutscene it
+went from 99 ms to 29 ms; in a heavy spot it is 110 ms, and 110 ms of card is a
+ceiling of 9 fps whatever the CPU does.
 
-The branch `merge/fxceless-latest` carries that on top.
+## What the frame was spent on (measured, in this order)
 
-`merge/nvidia` is **ztrx plus the frame-rate work of
-[fxceless/victory-fork](https://github.com/fxceless/victory-fork)**, merged
-from `fxceless/main` at `f85101b` (2026-11-25). The two forks share the same
-upstream point (`ffe310e`), so every source file merged without a conflict;
-only this README did, and it keeps ztrx's text plus this note. Nothing from
-that work is enabled by default.
+1. **A per-command profile** (`VICTORY_GPU_TIMING=1` + `VICTORY_D3D12_DRED=1`)
+   says a plain draw costs **1.36 us** on this card - native-level - while each
+   element of the title's **indirect stream cost 19.8 us**, 2 691 of them a
+   frame: 54% of the GPU. One compute pass of the title costs 10.9-16.9 ms and
+   is real work that no batching touches.
+2. **The copy-back wrote four bytes a call**: 250 236 kernel writes of 1.0 MB a
+   frame, on the one thread whose lateness the submitting thread waits for.
+3. **Textures picked by index were re-uploaded** for the same spans over and
+   over (54% of the uploads, 62% of the bytes), and the pass that does it was
+   allowed 288 MB and 750 ms of a frame by its own budget.
+4. **The objects a host list keeps alive were kept without a set**, so one list
+   held thousands of `AddRef`s of the same heap and the same staging buffer, and
+   released them all when it was reset - 17.3 ms of a frame in resets alone.
+5. **Our own clamps of the title's indirect arguments**: one compute dispatch
+   each, 501 a frame, clamping 8 500 records where the title asked for 1 234.
 
-What comes from fxceless, in their words:
+## What this branch changed
 
-- Frame rate, second night: a submit thread of the layer's own, a copy queue
-  for fetches, indirect draw windows made safer, a profiler; all behind
-  switches.
-- Frame rate, processor side: a cheap fingerprint in the descriptor sync,
-  draw-table slots left to their draws, no failing write-watch calls, card
-  fetches inside their flights.
-- The first room renders right: byte-copied descriptor records are mirrored,
-  views off their copy's elements get their own bytes, card room for the first
-  world frame, levels on demand run on the card.
+| commit | what | against |
+|---|---|---|
+| `abddf43` | a stretch the kernel will not take is opened (`VirtualProtect`) and copied | per-page kernel drilling, 8.6 us a page |
+| `e6ab460` | the heap-texture walk skips 663 884 slots when nothing was placed and nothing waits | 54.5 ms a frame |
+| `13356c2` | page-marked guest writes: shaders report `writes_guest_memory`, the copy-back compares only the marked pages | 124 ms of comparison |
+| `5962ed4` | the frame line counts the texture uploads paid for twice (`reuploaded=`) and divides them by cause | "broken invalidation" against "the title really streams this much" |
+| `2373257` | the pass over textures is bounded to 100 ms a frame | 246-420 ms |
+| `f95fc6c` | what the card wrote goes back by an opened copy first; the counters stopped reading as milliseconds when they were counts | a 90.4 ms kernel write of 37.9 MB |
+| `07b614c` | the records of an indirect window are drawn as **one** `ExecuteIndirect` when the run ends (`VICTORY_INDIRECT_MERGE=1`, off by default) | 8.4-10 us a command |
+| `0b07e0d` | a run still waiting to be drawn is flushed before a clamp overwrites its scratch buffer | a crash |
+| `590f135` | "lists reset" is split into its parts | 129.8 ms read as one number |
+| `9051ace` | the runs written back are joined over 16-byte gaps | 250 236 writes a frame -> 167 |
+| `cbc25f6` | our clamps are counted; the window's first size is a switch | 501 clamps a frame |
+| `ee0338a` | an object a list keeps is kept once | 17.3 ms of resets |
 
-Switches that came with it (off by default unless said otherwise; each is
-described in a comment where it is read):
+## Hypotheses measured and refuted (so nobody repeats them)
 
-| Switch | Effect |
-|---|---|
-| `VICTORY_ASYNC_SUBMIT=1` | submissions prepared and sent by a thread of the layer, not by the title's render thread |
-| `VICTORY_QUEUE2=1` | fetches of what shaders wrote go to a copy queue |
-| `VICTORY_INDIRECT_WINDOW=1` | a window of indirect draws recorded as one dispatch; it lost the device three times on their machine before the fix, and their checker `VICTORY_INDIRECT_WINDOW_CHECK=1` is what found the cause |
-| `VICTORY_CARD_FETCH_INFLIGHT=1` | card fetches kept inside their flights; their copy-back thread's wait went from 181 ms a frame to a fraction of it |
-| `VICTORY_LEVELS_ON_DEMAND=1` | a texture the title fills takes card memory only for the levels the title reaches |
-| `VICTORY_CARD_BUFFERS_MIN_MB=1`, `VICTORY_CARD_BUFFERS_MB=1024` | room kept for the card copies of title buffers |
-| `VICTORY_INPLACE` | title memory opened as a graphics heap, buffers used in place instead of copied (first stage only) |
-| `VICTORY_PAGE_WRITES=guards`, `VICTORY_DSTORAGE_RETRIES=0` | more page-write guards; page-destination reads retried |
-| `VICTORY_MERGE_GAP=64 VICTORY_MERGE_RUNS=4096` | title bytes under flights' shader writes joined over small gaps (not exact) |
-| `VICTORY_PROFILE=1` | sampling profiler inside the layer (diagnostics build) |
-| `VICTORY_WAVE_WIDE=1` | the 64-lane barrier form they had to turn off after a device hang |
-
-Their measured settings on that machine: `VICTORY_RELAY=2`, or
-`VICTORY_LATE_WAIT=3 VICTORY_WIDE_BACK=1 VICTORY_CARD_BUFFERS_MIN_MB=1
-VICTORY_CARD_BUFFERS_MB=1024`, took 420-450 ms a frame down to 240-350 ms.
-
-## Requirements
-
-- Windows 10/11 x64, a CPU with AVX2
-- A Direct3D 12 GPU with shader model 6.6 and mesh shaders (NVIDIA RTX 20 series or newer)
-- Rust (the version in `rust-toolchain.toml`)
-- Several GB of free Windows commit memory (raise the paging file if `crashes.log` reports error 1455)
+- **Page faults**: 49 745 -> 4 167 a frame changed the copy-back by 6%.
+- **State changes** (0.25 rebinds, 0.5 barriers a command): not the cost.
+- **Pixels**: 0.56 Mpx a draw, a normal deferred renderer; VRS helped nothing.
+- **The relay at the present**: the end-of-frame wait measures 0.0 ms a frame;
+  page versions to let the frame run ahead would buy nothing. What costs is
+  `WHY_STALE` - the next frame reads memory the previous frame's shaders wrote,
+  and that is the console's shared memory this layer has to pay for.
+- **Opening memory ranges instead of the kernel's write**: 13 ms a MB against
+  0.6 for `NtWriteVirtualMemory`; the kernel's write is the fast way into this
+  title's memory.
+- **Writing the frame's changed bytes once**: they already are - 23 GB over
+  1 024 frames is 22.8 MB a frame, exactly what the frame line says.
+- **The shader emitter**: of 2 596 542 descriptor loads, 1 269 812 are already
+  `scalar` (one a wave, not a pixel), 174 561 are constants that fold, and the
+  rest are per-lane where the `umin` clamp is what keeps the index inside the
+  heap. Very little is left there - the command stream is where the time is,
+  not the shader bodies.
 
 ## Build
 
 ```powershell
-cargo build --release -p victory
+cargo build --release -p victory                                              # normal play
+cargo build --release -p victory --features diagnostics --target-dir <dir>    # the per-command profile
 ```
 
 ## Play
@@ -83,45 +103,48 @@ cargo build --release -p victory
 powershell -ExecutionPolicy Bypass -File scripts\play.ps1 -Game "<your game folder>\<the game's exe>"
 ```
 
-`scripts\play.ps1` keeps the shader cache and saves in folders you choose
-(`-Cache`, `-Data`) and presses no buttons for you. Controller: XInput pads
-(a DualShock/DualSense through DS4Windows works). With no pad connected the
-keyboard acts as one while the game window has focus.
+## Switches this branch adds or relies on
 
-## Faster settings (optional, off by default)
-
-`VICTORY_RELAY=2`, or `VICTORY_LATE_WAIT=3 VICTORY_WIDE_BACK=1` cut frame
-time on the test machines. Set them in PowerShell before running the script.
-
-## Debugging switches
-
-| Switch | Effect |
+| switch | effect |
 |---|---|
-| `VICTORY_CAPTURE=<dir>` + `VICTORY_CAPTURE_FRAMES=<list>` | save those frames as PNG (diagnostics build) |
-| `VICTORY_KEYS=30:Enter,35:X` | press keys at those seconds (diagnostics build) |
-| `VICTORY_D3D12_DRED=1` | on a GPU failure, report the commands in flight |
-| `VICTORY_PIPELINE_WAIT_MS=24` | shorter per-frame wait for pipelines still being built |
+| `VICTORY_INDIRECT_WINDOW=1` | a run of the title's indirect records is clamped once into a scratch buffer (19.8 -> 8.4-10 us a command) |
+| `VICTORY_INDIRECT_WINDOW_RECORDS=64` | how many records one clamp covers: 501 clamps a frame at 16, 46 at 64 |
+| `VICTORY_INDIRECT_MERGE=1` | the records of a run are drawn as one `ExecuteIndirect` (off by default: one run still has to look at the picture) |
+| `VICTORY_CARD_FETCH_INFLIGHT=1`, `..._MB=128` | the pieces a flight's compare flags are fetched inside the flight: the relay's 73-272 ms of waits go to 0 |
+| `VICTORY_OPEN_COPIES=0/1/2` | how what the card wrote goes back: kernel only, kernel first, or opened copy first (`1` is the fast one here) |
+| `VICTORY_BACK_GAP=16` | how far apart the written runs may be joined into one kernel call (`=0` keeps every run apart) |
+| `VICTORY_MERGE_RUNS=512` | how many changed runs a submission may send up before it settles the flights instead |
+| `VICTORY_TEXTURE_CATCHUP=0`, `VICTORY_TEXTURE_STAGE_MS=100`, `VICTORY_TEXTURE_STAGE_MB=96` | the budget of the pass that uploads textures picked by index |
+| `VICTORY_TEXTURE_SPANS=0` | turn off the `reuploaded=` census |
+| `VICTORY_HEAP_TEXTURE_SKIP=0` | walk every heap slot every frame, as before |
+| `VICTORY_RELAY=2`, `VICTORY_LATE_WAIT_LISTS=256` | the copy-back on a thread of its own; how many host lists may be in the air |
+| `VICTORY_GPU_TIMING=1`, `VICTORY_D3D12_DRED=1`, `VICTORY_SLOW_LIST_MS=200` | the per-command profile (diagnostics build only) |
 
-Diagnostics build: `cargo build --profile diag -p victory --features diagnostics`
-
-## Credits
+## Credits and references
 
 - **[VIctory](https://github.com/Marvisak/VIctory)** by Marvisak and its
-  contributors is the base of everything here: the loader, the runtime
-  services, the Direct3D 12 back end and the shader recompiler. Licensed
-  GPL-3.0-or-later; so is this fork.
-- **[fxceless/victory-fork](https://github.com/fxceless/victory-fork)** by
-  fxceless: the frame-rate work merged into `merge/nvidia` (see above).
-- **[XCL](https://github.com/ivall/xcl)** by ivall and its contributors
-  (GPL-2.0-only) was used as a reference for how the same title behaves under
-  another layer. Fixes inspired by it were written anew in VIctory's code.
-- The guard over every view of a memory page is code by **myokex**
-  ([victory-amd](https://github.com/myokex/victory-amd), commit `c6dc4d8`),
-  which adapts pull request #115 here by Spexivus, its correction by joroyt and
-  a part of VIctory #1122 by tightfall. The read-beside fix for kernel reads
-  into title memory is by **Joshua Odom** (commit `10ea38e` of the same fork
-  family). Both are carried here unchanged apart from one merge conflict.
+  contributors: the loader, the runtime services, the D3D12 back end and the
+  shader recompiler - the base of everything here. GPL-3.0-or-later, as is this
+  fork.
+- **[ztrx](https://github.com/Zettrox/ztrx)** by Zettrox: the fork this one is
+  made from.
+- **[fxceless/victory-fork](https://github.com/fxceless/victory-fork)**: the
+  submit thread, the copy queue for fetches, the indirect windows, the card
+  fetches inside their flights - all merged here and measured again.
+- **[DexNom/VIctory](https://github.com/DexNom/VIctory)**: the page-marked guest
+  writes (`bc3cd4b`, `921d8d3`) the copy-back now compares with.
+- **[Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD)**
+  and **[uiliannn/VItoriaBr](https://github.com/uiliannn/VItoriaBr)**: the AMD
+  path, and the "recommended preset" this fork starts from (`RELAY=2`,
+  `JOIN_COPIES=1`, `WIDE_MERGE=1`, `WIDE_REFRESH=1`, `TEXTURE_NO_WAIT=1`,
+  `CARD_BUFFERS_MB=2048`, `TEXTURE_BUDGET_MB=10240`).
+- **myokex/victory-amd** (the guard over every view of a page) and
+  **ivall/xcl** (a reference for how the same title behaves under another layer),
+  as the upstream README says.
 
 ## License
 
-GPL-3.0-or-later (see `LICENSE`). Based on VIctory (Marvisak) and victory-fork (fxceless).
+GPL-3.0-or-later (see `LICENSE`). Based on VIctory (Marvisak), ztrx (Zettrox)
+and victory-fork (fxceless).
+
+
