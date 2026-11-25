@@ -390,11 +390,31 @@ pub(crate) fn card_dirty(sent_as: u64) -> Vec<(Arc<Shadow>, Vec<(usize, usize)>)
             })
             .unwrap_or_default();
         if !ranges.is_empty() {
-            out.push((shadow, joined(ranges)));
+            let raw: u64 = ranges.iter().map(|&(a, b)| b.saturating_sub(a) as u64).sum();
+            let joined_ranges = joined(ranges);
+            let joined_bytes: u64 = joined_ranges.iter().map(|&(a, b)| b.saturating_sub(a) as u64).sum();
+            WATCH_RANGES[0].fetch_add(raw, Ordering::Relaxed);
+            WATCH_RANGES[1].fetch_add(joined_bytes, Ordering::Relaxed);
+            WATCH_RANGES[2].fetch_add(1, Ordering::Relaxed);
+            out.push((shadow, joined_ranges));
         }
         true
     });
     out
+}
+
+/// Since the last frame line, of what [`card_dirty`] took for the card's
+/// copies: the bytes the write-watch named changed, the bytes after the
+/// touching ranges were joined (what is actually copied up), and how many
+/// copies had something. The frame line's "copies ... MB" should equal the
+/// joined bytes; the ratio says how much of what goes up is the watch's own
+/// reporting - a page named for a few bytes changed - which is the only part
+/// of that traffic that could be taken out.
+pub(crate) static WATCH_RANGES: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+
+/// [`WATCH_RANGES`], taken.
+pub(crate) fn take_watch_ranges() -> [u64; 3] {
+    WATCH_RANGES.each_ref().map(|c| c.swap(0, Ordering::Relaxed))
 }
 
 /// Ranges in order, those that overlap or touch as one.

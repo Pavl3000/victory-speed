@@ -7759,6 +7759,19 @@ impl Meter {
         crate::shadow::back_line(frames);
         crate::shadow::writes_line(frames);
         {
+            let [raw, joined, copies] = crate::shadow::take_watch_ranges();
+            if copies > 0 {
+                tracing::info!(
+                    "the card copies' changed bytes per frame: {:.1} MB as the write-watch named them, {:.1} MB after joining \
+                     ({:.1}x), in {:.0} copies with something",
+                    raw as f64 / 1e6,
+                    joined as f64 / 1e6,
+                    if joined > 0 { raw as f64 / joined as f64 } else { 0.0 },
+                    copies as f64 / frames
+                );
+            }
+        }
+        {
             let clamps = crate::indirect::take_clamps();
             if clamps[0] > 0 {
                 tracing::info!(
