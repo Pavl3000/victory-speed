@@ -2032,7 +2032,8 @@ impl Drop for Deferred {
 static DEFERRED_GONE: [std::sync::atomic::AtomicU64; 7] =
     [const { std::sync::atomic::AtomicU64::new(0) }; 7];
 
-/// [`DEFERRED_GONE`], taken.
+/// [`DEFERRED_GONE`], taken (the frame account line, diagnostics only).
+#[cfg_attr(not(feature = "diagnostics"), allow(dead_code))]
 pub(crate) fn take_deferred_gone() -> [u64; 7] {
     DEFERRED_GONE.each_ref().map(|c| c.swap(0, Ordering::Relaxed))
 }
@@ -7741,6 +7742,17 @@ impl Meter {
         }
         crate::shadow::back_line(frames);
         crate::shadow::writes_line(frames);
+        {
+            let clamps = crate::indirect::take_clamps();
+            if clamps[0] > 0 {
+                tracing::info!(
+                    "our clamps of the title's indirect arguments per frame: {:.0}, over {:.1} records each (VICTORY_INDIRECT_WINDOW_RECORDS={})",
+                    clamps[0] as f64 / frames,
+                    clamps[1] as f64 / clamps[0].max(1) as f64,
+                    std::env::var("VICTORY_INDIRECT_WINDOW_RECORDS").unwrap_or_else(|_| "16".into())
+                );
+            }
+        }
         {
             let [passes, pieces, compares] = [0, 1, 2].map(|i| CARD_PASSES[i].swap(0, Ordering::Relaxed) as f64 / frames);
             if passes + compares > 0.0 {

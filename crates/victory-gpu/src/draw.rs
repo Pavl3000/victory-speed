@@ -185,6 +185,22 @@ const WINDOW_MOST: u64 = 64;
 /// Off for the rest of the run from the first error the card's driver
 /// reports to the system (`crate::drvwatch`): every loss of the card in a
 /// run with windows was announced that way seconds ahead.
+/// How many records a window clamps ahead of the draws that read them, once
+/// the title is seen to walk a buffer (`VICTORY_INDIRECT_WINDOW_RECORDS`, 16;
+/// up to 256). Each clamp is a compute dispatch of ours: the world at 21:55
+/// had 583 dispatches a frame against 1 234 indirect commands, so the window
+/// size is what decides whether our clamps are a few or hundreds a frame -
+/// `crate::indirect::take_clamps` says which it is.
+fn window_records() -> u32 {
+    static N: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("VICTORY_INDIRECT_WINDOW_RECORDS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .map_or(16, |n| n.clamp(1, 256))
+    })
+}
+
 fn windows() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_INDIRECT_WINDOW").is_some_and(|v| v == "1")) && !crate::drvwatch::tripped()
@@ -3269,7 +3285,7 @@ impl State {
                             && (w.records == 1 || step == u64::from(w.step));
                         if walks {
                             let fit = (args.left(arguments) / step).min(WINDOW_MOST) as u32;
-                            (step as u32, (if w.records == 1 { 16 } else { w.records * 2 }).min(fit).max(1))
+                            (step as u32, (if w.records == 1 { window_records() } else { w.records * 2 }).min(fit).max(1))
                         } else {
                             (stride, max)
                         }

@@ -346,6 +346,19 @@ pub(crate) fn bound(
     clamp_into(list, c, &dst, budget, src, count, spec, false).then_some(dst)
 }
 
+/// Since the last frame line: clamps made (each one a compute dispatch of
+/// ours, so a command of the card's) and the records they clamped. A window
+/// that never grows past one record costs a clamp a record: the frame at
+/// 21:55 had 583 dispatches and 1 234 indirect commands, and how many of the
+/// dispatches were clamps is what this says.
+pub(crate) static CLAMPS: [std::sync::atomic::AtomicU64; 2] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 2];
+
+/// [`CLAMPS`], taken.
+pub(crate) fn take_clamps() -> [u64; 2] {
+    CLAMPS.each_ref().map(|c| c.swap(0, std::sync::atomic::Ordering::Relaxed))
+}
+
 /// [`bound`] for a window of records clamped ahead of the draws that will
 /// read them (`crate::draw`'s windows; no count buffer). The records past
 /// the ones the title filled are whatever the buffer holds, and each
@@ -363,7 +376,12 @@ pub(crate) fn bound_ahead(
 ) -> Option<ID3D12Resource> {
     let bytes = validate_layout(spec, src.1, None)?;
     let (c, budget, dst) = (clamp()?, list.budget()?, list.indirect_scratch(bytes)?);
-    clamp_into(list, c, &dst, budget, src, None, spec, true).then_some(dst)
+    let done = clamp_into(list, c, &dst, budget, src, None, spec, true);
+    if done {
+        CLAMPS[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        CLAMPS[1].fetch_add(u64::from(spec.2), std::sync::atomic::Ordering::Relaxed);
+    }
+    done.then_some(dst)
 }
 
 /// [`record_clamp_as`] into `list`'s scratch buffer `dst`, from the state
