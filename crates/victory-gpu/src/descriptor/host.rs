@@ -830,11 +830,28 @@ pub(crate) fn probe_view_limit() {
             };
             made.is_ok()
         };
-        let views = if fits(UNCAPPED_VIEWS) {
-            UNCAPPED_VIEWS
-        } else {
-            PORTABLE_VIEWS
-        };
+        // The largest heap this host really takes, asked from the top down.
+        // The documented cap is 1,000,000 descriptors for resource binding
+        // tiers 1 and 2, and NVIDIA reports that, but some drivers take more
+        // and the title's own heap is a little over 1,200,000 views (count
+        // 1245184 on the retail build): a heap below that leaves the tail of
+        // the title's table reading the null slot, which shows as surfaces
+        // with no texture. Every rung is tried once; the first that the
+        // driver makes is the one used, so a host that truly stops at
+        // PORTABLE_VIEWS behaves exactly as before.
+        const LADDER: &[u32] = &[
+            UNCAPPED_VIEWS,
+            2_000_000,
+            1_750_000,
+            1_507_328,
+            1_300_000,
+            1_100_000,
+        ];
+        let views = LADDER
+            .iter()
+            .copied()
+            .find(|&count| fits(count))
+            .unwrap_or(PORTABLE_VIEWS);
         tracing::info!(
             views,
             "host view heaps hold {views} views; view indices are clamped to the null slot at the end from the first shader on"
