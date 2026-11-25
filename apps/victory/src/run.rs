@@ -131,6 +131,45 @@ pub fn run(
     Ok(())
 }
 
+/// Debugging aid: `VICTORY_POKE=<rva>:<byte>,...` (hex) writes the byte at
+/// each title+rva twice a second. A title that ends itself when its main
+/// loop has not ticked for a while (Grand Theft Auto VI: 30 s) runs on
+/// through slower frames with its tick flag poked. The address must be
+/// writable title data.
+///
+/// Also the render size: the title keeps its internal width and height in two
+/// dwords that its render-target setup reads (`0x1499fecf8` and
+/// `0x1499fecfc` at the preferred base of build 1.0.2.1, so the RVAs
+/// `0x99fecf8` and `0x99fecfc`). `VICTORY_DISPLAY_MODE` does not change them:
+/// the title keeps a 3840x2160 swap chain and renders 2560x1440 into it. This
+/// is the only handle on the number of pixels the card shades.
+#[cfg(all(windows, feature = "diagnostics"))]
+fn poke(base: usize, size: usize) {
+    let Ok(list) = std::env::var("VICTORY_POKE") else {
+        return;
+    };
+    let hex = |s: &str| usize::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok();
+    let pokes: Vec<(usize, u8)> = list
+        .split(',')
+        .filter_map(|p| p.split_once(':'))
+        .filter_map(|(rva, byte)| Some((hex(rva)?, u8::try_from(hex(byte)?).ok()?)))
+        .filter(|&(rva, _)| rva < size)
+        .collect();
+    if pokes.is_empty() {
+        return;
+    }
+    println!("title bytes poked twice a second (VICTORY_POKE): {}", pokes.len());
+    std::thread::spawn(move || {
+        loop {
+            for &(rva, byte) in &pokes {
+                // SAFETY: a byte inside the mapped image, checked above.
+                unsafe { ((base + rva) as *mut u8).write_volatile(byte) };
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    });
+}
+
 /// The debugging aids (README): scheduled stack dumps, watched values and
 /// memory saved on a crash.
 #[cfg(all(windows, feature = "diagnostics"))]
@@ -138,6 +177,7 @@ fn diagnostics(image: &victory_loader::LoadedImage, cfg: &victory_core::Config) 
     victory_loader::dump_stacks_on_schedule();
     victory_hle::modules::audio::capture::start();
     watch(image.base(), image.info().size_of_image as usize);
+    poke(image.base(), image.info().size_of_image as usize);
     // Debugging aid: `VICTORY_CRASH_SAVE=<rva>:<len>,...` (hex) writes those
     // title ranges to `crash-<rva>.bin` in the cache dir on a crash.
     let size = image.info().size_of_image as usize;

@@ -1345,6 +1345,33 @@ pub(crate) fn timing_on() -> bool {
     timing()
 }
 
+/// `VICTORY_SLOW_LIST_MS`: how long a submission must take before the timing
+/// report names it and its slowest commands (default 50 ms; 0 names every
+/// one). Lowering it turns the timing run into a per-command profile of the
+/// whole frame, which is the only way to attribute the card's time to
+/// pipelines without a GPU profiler.
+#[cfg(feature = "diagnostics")]
+fn slow_list_threshold() -> std::time::Duration {
+    static MS: OnceLock<u64> = OnceLock::new();
+    std::time::Duration::from_millis(*MS.get_or_init(|| {
+        std::env::var("VICTORY_SLOW_LIST_MS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(50)
+    }))
+}
+
+/// `VICTORY_SLOW_LIST_COMMANDS`: how many of the slowest commands of such a
+/// submission are named (default 6, up to 4095 - the timestamp ring's size).
+#[cfg(feature = "diagnostics")]
+fn slow_list_commands() -> usize {
+    static N: OnceLock<usize> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("VICTORY_SLOW_LIST_COMMANDS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(6)
+            .clamp(1, 4095)
+    })
+}
+
 /// Names a host object for the device-removed report, which names the
 /// allocations a page fault hit (only with device-removed data on).
 pub(crate) fn name(object: &impl Interface, text: impl FnOnce() -> String) {
@@ -5551,12 +5578,12 @@ impl Host {
             // > 1` was the test): the two 50 ms lists of the gameplay
             // frame, each a submission of its own, printed nothing.
             #[cfg(feature = "diagnostics")]
-            if timing() && started.elapsed() > std::time::Duration::from_millis(50) {
+            if timing() && started.elapsed() > slow_list_threshold() {
                 // SAFETY: a plain query.
                 let frequency = unsafe { self.queue.GetTimestampFrequency() }.unwrap_or(1);
                 let commands = runs[i].notes.lock().unwrap_or_else(|e| e.into_inner()).len();
                 tracing::warn!(ms = started.elapsed().as_millis(), commands, "slow host list");
-                for (ms, op) in runs[i].slowest(frequency, 6) {
+                for (ms, op) in runs[i].slowest(frequency, slow_list_commands()) {
                     tracing::warn!("slow list command, {ms:.1} ms: {op}");
                 }
             }
