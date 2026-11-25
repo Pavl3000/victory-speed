@@ -1339,6 +1339,12 @@ fn timing() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_GPU_TIMING").is_some())
 }
 
+/// [`timing`] for the draw path: whether per-list GPU timing is asked for.
+#[cfg(feature = "diagnostics")]
+pub(crate) fn timing_on() -> bool {
+    timing()
+}
+
 /// Names a host object for the device-removed report, which names the
 /// allocations a page fault hit (only with device-removed data on).
 pub(crate) fn name(object: &impl Interface, text: impl FnOnce() -> String) {

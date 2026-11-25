@@ -949,6 +949,15 @@ impl State {
     /// could not be given a view.
     pub(crate) fn bind(&mut self, list: &HostList, p: &HostPipeline, compute: bool) -> bool {
         let l = &list.list;
+        // Diagnostics: with `VICTORY_GPU_TIMING=1` (and DRED on, which is what
+        // makes a note carry a timestamp) every draw of a list leaves a marker
+        // named after its pipeline, so the slow-list report says which
+        // pipelines a slow list spends its time in. Before this the report
+        // printed `commands=0`: nothing recorded a note per draw.
+        #[cfg(feature = "diagnostics")]
+        if crate::host::timing_on() {
+            list.note_op(|| format!("draw {}", p.name));
+        }
         // `VICTORY_VRS=2x2` (and 1x2, 2x1, 2x4, 4x2, 4x4): the coarse shading
         // rate is set on the list once, so every draw of it shades at that
         // rate. The console build has no graphics options and renders at
