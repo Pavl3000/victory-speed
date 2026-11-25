@@ -1978,7 +1978,20 @@ impl Deferred {
     /// next recording (a frame resets some 250 lists, and a fresh `Deferred`
     /// for each was nine allocations and frees every frame). The upload
     /// memory's count in [`ALIVE`] is given back here, as [`Drop`] does.
-    fn clear(&mut self) {
+    /// Returns what it let go - (copies, uploads, kept, refreshed, textures,
+    /// writes, backs) - for the frame line: the 17.3 ms "the deferred work
+    /// let go" is COM releases (uploads, kept) or `Arc` drops in the steps,
+    /// and the lengths say which.
+    fn clear(&mut self) -> [u64; 7] {
+        let counts = [
+            self.copies.len() as u64,
+            self.uploads.len() as u64,
+            self.kept.len() as u64,
+            self.refreshed.len() as u64,
+            self.textures.len() as u64,
+            self.writes.len() as u64,
+            self.backs.len() as u64,
+        ];
         ALIVE[6].fetch_sub(self.uploads.len() as u64, Ordering::Relaxed);
         ALIVE[7].fetch_sub(self.upload_bytes, Ordering::Relaxed);
         self.uploads.clear();
@@ -1991,6 +2004,7 @@ impl Deferred {
         self.backs.clear();
         self.budget_zeroed = false;
         self.indirect_readable = 0;
+        counts
     }
 
     /// Holds `buffer` (`size` bytes of upload memory) until the list is
@@ -2008,6 +2022,19 @@ impl Drop for Deferred {
         ALIVE[6].fetch_sub(self.uploads.len() as u64, Ordering::Relaxed);
         ALIVE[7].fetch_sub(self.upload_bytes, Ordering::Relaxed);
     }
+}
+
+/// What resets let go of, since the last frame line: the deferred work's
+/// containers by length - copies, uploads, kept objects, refreshed ranges,
+/// textures, writes, read-backs - so that the "deferred" part of
+/// `lists reset` can be read as COM releases (uploads, kept) against `Arc`
+/// drops in the steps.
+static DEFERRED_GONE: [std::sync::atomic::AtomicU64; 7] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 7];
+
+/// [`DEFERRED_GONE`], taken.
+pub(crate) fn take_deferred_gone() -> [u64; 7] {
+    DEFERRED_GONE.each_ref().map(|c| c.swap(0, Ordering::Relaxed))
 }
 
 /// Whether a queue's submissions go to the card without a wait for each
@@ -6065,7 +6092,10 @@ impl HostList {
         self._alive.used();
         // Emptied in place, their memory kept: a frame resets some 250 lists,
         // and a fresh `Deferred` for each was nine allocations and frees.
-        self.deferred().clear();
+        let gone = self.deferred().clear();
+        for (total, n) in DEFERRED_GONE.iter().zip(gone) {
+            total.fetch_add(n, Ordering::Relaxed);
+        }
         #[cfg(feature = "diagnostics")]
         lap(crate::copystat::C::ResetDeferNs);
         self.states.lock().unwrap_or_else(|e| e.into_inner()).clear();

@@ -1213,6 +1213,25 @@ pub(crate) fn log(frames: f64) {
         c[C::HostListNs as usize] / 1e6,
         c[C::PartsTogether as usize],
     );
+    // What a reset's deferred work held, per frame: the "deferred" part of
+    // "lists reset" above is COM releases (uploads, kept) against `Arc` drops
+    // in the steps, and these lengths say which it is.
+    {
+        let g = crate::host::take_deferred_gone();
+        if g.iter().any(|&n| n > 0) {
+            tracing::info!(
+                "  of the reset, what was let go per frame: {:.0} copies, {:.0} uploads, {:.0} kept objects, \
+                 {:.0} refreshed ranges, {:.0} textures, {:.0} writes, {:.0} read-backs",
+                g[0] as f64 / frames,
+                g[1] as f64 / frames,
+                g[2] as f64 / frames,
+                g[3] as f64 / frames,
+                g[4] as f64 / frames,
+                g[5] as f64 / frames,
+                g[6] as f64 / frames
+            );
+        }
+    }
     // What is copied whole, largest first: memory nobody tells us about.
     let whole = WHOLE.lock().unwrap_or_else(|e| e.into_inner()).take();
     let mut whole: Vec<_> = whole.into_iter().flatten().collect();
