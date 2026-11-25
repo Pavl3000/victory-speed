@@ -6384,16 +6384,17 @@ impl<'a> Lower<'a> {
             let tail = self.tail[q].ok_or(WHY)?;
             let at = self.edges.get(&(q, block)).copied().unwrap_or(tail);
             let index = match arg {
-                Source::Loaded { load, first } => {
-                    let here = std::mem::replace(&mut self.cur, at);
-                    let index = self.heap_index(*load, *first, sampler);
-                    self.cur = here;
-                    index?
-                }
                 Source::Phi { block: inner, args: inner_args } if depth > 0 => {
                     self.descriptor_phi(*inner, inner_args, sampler, depth - 1)?
                 }
-                _ => return Err(WHY),
+                // Everything else is asked for its heap index at the end of
+                // the predecessor: a descriptor loaded there, or one chosen
+                // there by a condition (SCC). Before this, only a plain
+                // `Loaded` was understood and the whole program was dropped
+                // with WHY - which is how the world's main lit material
+                // variants (`PS_TexturedLit_8`, `PS_TexturedDeferred`) and
+                // the terrain mesh shaders came to be missing.
+                other => self.descriptor_index_at(other, sampler, at)?,
             };
             incoming.push((index, at));
         }
@@ -6401,6 +6402,43 @@ impl<'a> Lower<'a> {
         let phi = self.s.m.phi(join, self.s.t.i32);
         self.s.m.set_phi(phi, incoming);
         Ok(phi)
+    }
+
+    /// The heap index of a descriptor source in the block that ends at `at`:
+    /// a descriptor loaded there, or one chosen there by a condition (SCC).
+    /// `self.cur` is set to `at` for the whole computation and put back
+    /// before returning, whatever happens.
+    fn descriptor_index_at(&mut self, src: &Source, sampler: bool, at: usize) -> Result<V, Why> {
+        let here = std::mem::replace(&mut self.cur, at);
+        let out = match src {
+            Source::Loaded { load, first } => self.heap_index(*load, *first, sampler),
+            Source::Select { scc, args } => match args[..] {
+                [Source::Loaded { load: a, first: fa }, Source::Loaded { load: b, first: fb }] => {
+                    match self.get(*scc) {
+                        Ok(Val::Bit(cond)) => {
+                            match (self.heap_index(a, fa, sampler), self.heap_index(b, fb, sampler)) {
+                                (Ok(set), Ok(clear)) => Ok(self.s.m.select(self.cur, cond, set, clear)),
+                                (Err(e), _) | (_, Err(e)) => Err(e),
+                            }
+                        }
+                        _ => Err("SCC without a value"),
+                    }
+                }
+                _ => Err("a descriptor chosen by a condition"),
+            },
+            // A descriptor fixed in the code: one path of a material choice
+            // hands over a literal (the "no such map" default, say). Its first
+            // dword is the heap index the title's other paths compute into a
+            // register.
+            // shortcut: the literal is taken as the index as it stands; a
+            // title that keeps a byte offset there would need the shift that
+            // `heap_index` applies. Wrong is a wrong texture on that one path,
+            // never a fault: the index is clamped to the null slot.
+            Source::Constant(c) => Ok(self.s.m.i32(c.first().copied().unwrap_or(0))),
+            _ => Err("a descriptor chosen by control flow"),
+        };
+        self.cur = here;
+        out
     }
 
     /// The bytes per element of the buffer view `src` names, if the program
