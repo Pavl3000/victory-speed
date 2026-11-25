@@ -7782,13 +7782,17 @@ impl Meter {
                  dropped {dropped:.0} without a host pipeline ({making} being made) and \
                  {indirect:.0} indirect; heap buffers {picked:.1} passes {picked_ms:.1} ms;                  texture slots written so far: {placed} placed, {objects} of objects; \
                  textures picked by index: {picked_textures} uploaded so far ({picked_mb} MB), \
-                 reuploaded={reuploaded} of them ({reuploaded_mb} MB) over {spans} spans, \
+                 reuploaded={reuploaded} of them ({reuploaded_mb} MB) over {spans} spans \
+                 ({again_filled} filled after their upload, {again_partly} with more of them mapped, {again_moved} with their memory moved), \
                  {picked_waiting} waiting, {picked_away} passed over unmapped; depth textures with                  unordered access: {du0} made, bound as depth {du1}x, cleared as depth {du2}x,                  unordered views refused {du3}x; buffer views left null as the host would refuse them: {refused}",
                 picked_textures = crate::draw::HEAP_TEXTURES.load(Ordering::Relaxed),
                 picked_mb = crate::draw::HEAP_TEXTURE_BYTES.load(Ordering::Relaxed) >> 20,
                 reuploaded = crate::draw::HEAP_TEXTURES_AGAIN.load(Ordering::Relaxed),
                 reuploaded_mb = crate::draw::HEAP_TEXTURE_AGAIN_BYTES.load(Ordering::Relaxed) >> 20,
                 spans = crate::draw::HEAP_TEXTURE_SPANS.load(Ordering::Relaxed),
+                again_filled = crate::draw::HEAP_TEXTURE_AGAIN_WHY[0].load(Ordering::Relaxed),
+                again_partly = crate::draw::HEAP_TEXTURE_AGAIN_WHY[1].load(Ordering::Relaxed),
+                again_moved = crate::draw::HEAP_TEXTURE_AGAIN_WHY[2].load(Ordering::Relaxed),
                 picked_waiting = crate::draw::HEAP_TEXTURES_WAITING.load(Ordering::Relaxed),
                 picked_away = crate::draw::HEAP_TEXTURES_AWAY.load(Ordering::Relaxed),
                 du0 = crate::resource::DEPTH_UNORDERED[0].load(Ordering::Relaxed),

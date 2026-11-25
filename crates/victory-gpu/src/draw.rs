@@ -439,6 +439,12 @@ fn span_census() -> bool {
 pub(crate) static HEAP_TEXTURE_SPANS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static HEAP_TEXTURES_AGAIN: AtomicU64 = AtomicU64::new(0);
 pub(crate) static HEAP_TEXTURE_AGAIN_BYTES: AtomicU64 = AtomicU64::new(0);
+/// Of [`HEAP_TEXTURES_AGAIN`], by what made the slot due again: its bytes
+/// were found changed after the upload (the title filled the texture
+/// itself, `filled`), more of its memory was mapped since (a texture
+/// streaming in, `partly`), or something said its memory moved while the
+/// view stayed what it was (a remap, a page written, a level).
+pub(crate) static HEAP_TEXTURE_AGAIN_WHY: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 pub(crate) static HEAP_TEXTURES_SAME_VIEW: AtomicU64 = AtomicU64::new(0);
 pub(crate) static HEAP_TEXTURE_SAME_VIEW_BYTES: AtomicU64 = AtomicU64::new(0);
 
@@ -1922,6 +1928,10 @@ impl State {
             // first look for the rest of the run. The look reads 48 KiB;
             // only a changed texture is uploaded again.
             // `VICTORY_HEAP_RECHECK=0`: uploaded once, as before.
+            // (Whether this look found the texture filled after its upload:
+            // the frame line's `reuploaded=` says how many of the uploads
+            // were for that.)
+            let mut filled = false;
             if let Some((at, len, print, looks, uploaded)) = host.texture_slot_checked(index) {
                 if crate::texture::fingerprint(at, len) == print {
                     HEAP_TEXTURES_RECHECKED[0].fetch_add(1, Ordering::Relaxed);
@@ -1934,6 +1944,7 @@ impl State {
                     continue;
                 }
                 let n = HEAP_TEXTURES_RECHECKED[1].fetch_add(1, Ordering::Relaxed);
+                filled = true;
                 if n < 200 || n.is_multiple_of(1000) {
                     tracing::warn!(
                         slot = index,
@@ -2034,6 +2045,13 @@ impl State {
                     );
                 }
             }
+            // Whether the slot was showing the very view the title has there
+            // before this upload makes it: asked before the making, for after
+            // it the slot holds what it was made from and always says yes.
+            let shown = span_census()
+                && heap
+                    .handle(index)
+                    .is_some_and(|handle| host.texture_slot_made_from(index, handle));
             let view = heap.handle(index).and_then(|handle| host.mirror(index, handle, true));
             let placed = view.as_ref().and_then(crate::descriptor::host::placed_texture);
             let resource = match placed.as_ref().or(view.as_ref()) {
@@ -2122,9 +2140,21 @@ impl State {
                 } else {
                     HEAP_TEXTURES_AGAIN.fetch_add(1, Ordering::Relaxed);
                     HEAP_TEXTURE_AGAIN_BYTES.fetch_add(bytes, Ordering::Relaxed);
+                    // Why the same span was taken again: the title filled it
+                    // after the upload (the look said so), more of its memory
+                    // was there, or something said its memory moved while the
+                    // view stayed what it was.
+                    let why = if filled {
+                        0
+                    } else if partly.is_some() {
+                        1
+                    } else {
+                        2
+                    };
+                    HEAP_TEXTURE_AGAIN_WHY[why].fetch_add(1, Ordering::Relaxed);
                 }
             }
-            if same_view() {
+            if shown {
                 HEAP_TEXTURES_SAME_VIEW.fetch_add(1, Ordering::Relaxed);
                 HEAP_TEXTURE_SAME_VIEW_BYTES.fetch_add(bytes, Ordering::Relaxed);
             }
