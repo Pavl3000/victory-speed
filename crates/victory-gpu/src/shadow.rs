@@ -1797,6 +1797,28 @@ pub(crate) fn merged_stats() -> [u64; 3] {
     [0, 1, 2].map(|i| MERGED[i].swap(0, Ordering::Relaxed))
 }
 
+/// The gap, in bytes, over which the runs of what shaders wrote and the
+/// title did not are joined into one write (`VICTORY_BACK_GAP`, 0 to 64;
+/// 16 here). Run 21:55: the CPU's compare back made 250 236 writes of 1.0 MB
+/// a frame - four bytes a kernel call, a quarter of a million calls a frame
+/// from one thread - and that thread's lateness is what the submitting
+/// thread waits for at `WHY_STALE`.
+///
+/// What it gives up: the gap's bytes are the title's as read a moment
+/// before, and are written back with the run. A title write landing on one
+/// of them between that read and this write is lost, which is why upstream
+/// #2009 split the runs at all; here the window is one kernel call and the
+/// span is `gap` bytes. `=0` keeps every run apart.
+fn back_gap() -> usize {
+    static GAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *GAP.get_or_init(|| {
+        std::env::var("VICTORY_BACK_GAP")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .map_or(16, |n| n.min(64))
+    })
+}
+
 /// `runs` (in order) with those a gap of `gap` bytes or fewer apart made
 /// one run, the gap's bytes included.
 fn joined_over(runs: Vec<(usize, usize)>, gap: usize) -> Vec<(usize, usize)> {
@@ -2616,8 +2638,16 @@ impl Shadow {
                 crate::watch::writing(start + at, n);
                 // Only the GPU's bytes (upstream #2009): the rest of the
                 // stretch is the title's as read, and a title write landing
-                // there since stays.
-                for &(off, len) in &runs {
+                // there since stays. Runs a few bytes apart are joined
+                // (`VICTORY_BACK_GAP`, 16 by default): the run at 21:55
+                // showed 250 236 writes of 1.0 MB a frame - four bytes a
+                // kernel call - on the thread whose lateness the submitting
+                // thread waits for. The gap's bytes go with the run from
+                // `title`, where they are the title's own, so the cost is
+                // the race the runs were split for in the first place, over
+                // `gap` bytes and the microseconds of one call;
+                // `VICTORY_BACK_GAP=0` keeps every run apart, as before.
+                for &(off, len) in &joined_over(std::mem::take(&mut runs), back_gap()) {
                     write_back(WriteBy::Cpu, (start + at + off) as *mut u8, title[off..].as_ptr(), len);
                     written += len;
                 }
