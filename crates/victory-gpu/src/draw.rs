@@ -987,6 +987,7 @@ impl State {
         // Heaps first: a root signature with directly indexed heaps must be
         // set after them.
         if self.host_heaps != self.heaps {
+            crate::host::REBINDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let heaps: Vec<Option<ID3D12DescriptorHeap>> = self
                 .heaps
                 .iter()
@@ -1010,6 +1011,7 @@ impl State {
         TESTED_DEPTH.set((tested, false));
         let root = p.root.as_raw() as usize;
         if self.host_roots[usize::from(compute)] != root {
+            crate::host::REBINDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // SAFETY: an open list and a live root signature.
             unsafe {
                 if compute {

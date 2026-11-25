@@ -1080,6 +1080,10 @@ fn present_now(this: This, planes: u32, plane_parameters: *const Plane) -> HRESU
     }
     if frame.is_power_of_two() {
         let (draws, dispatches) = crate::list::take_counts();
+        // What we recorded around the commands since the last line: a
+        // resource barrier and a root/heap rebind are the two things that can
+        // turn a microsecond command into tens of microseconds.
+        let (barriers, rebinds) = crate::host::take_record_counts();
         #[cfg(windows)]
         let (drawn, dispatched) = {
             static DRAWN: AtomicU64 = AtomicU64::new(0);
@@ -1098,6 +1102,8 @@ fn present_now(this: This, planes: u32, plane_parameters: *const Plane) -> HRESU
             drawn,
             dispatches,
             dispatched,
+            barriers = barriers,
+            rebinds = rebinds,
             "frame presented (since the last line: draws and dispatches, and those run on the host)"
         );
         #[cfg(windows)]

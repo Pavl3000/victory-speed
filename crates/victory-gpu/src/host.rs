@@ -1345,6 +1345,21 @@ pub(crate) fn timing_on() -> bool {
     timing()
 }
 
+/// Barriers recorded and root-signature/heap rebinds made, since the last
+/// frame line. Counted because a command costs 17-63 us of GPU time here
+/// against a few on the console: the work is not the cost, what the layer
+/// records around it is, and these two are the candidates.
+pub(crate) static BARRIERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static REBINDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Takes both for the frame line and starts the count again.
+pub(crate) fn take_record_counts() -> (u64, u64) {
+    (
+        BARRIERS.swap(0, Ordering::Relaxed),
+        REBINDS.swap(0, Ordering::Relaxed),
+    )
+}
+
 /// `VICTORY_SLOW_LIST_MS`: how long a submission must take before the timing
 /// report names it and its slowest commands (default 50 ms; 0 names every
 /// one). Lowering it turns the timing run into a per-command profile of the
@@ -6100,6 +6115,7 @@ impl HostList {
                 D3D12_RESOURCE_STATES(wanted as i32),
             );
             // SAFETY: an open list and a live texture.
+            BARRIERS.fetch_add(1, Ordering::Relaxed);
             unsafe { self.list.ResourceBarrier(&[barrier]) };
         }
     }
