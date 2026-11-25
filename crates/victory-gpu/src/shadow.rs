@@ -1447,6 +1447,56 @@ fn copy_jobs(copies: Vec<(usize, usize, usize)>) -> Vec<Job> {
     jobs
 }
 
+/// Which of the paths that put what shaders wrote into title memory did it.
+#[derive(Clone, Copy)]
+pub(crate) enum WriteBy {
+    /// The CPU's compare back (`Shadow::copy_back_with`), counted in the
+    /// frame line's "copying back".
+    Cpu = 0,
+    /// The relay's merge (`Shadow::relay_merge`), counted there too.
+    Relay = 1,
+    /// A copy in the card's memory, its pieces fetched and merged
+    /// (`Shadow::card_merge`).
+    Card = 2,
+    /// The same by the relay (`Shadow::card_merge_relay`).
+    CardRelay = 3,
+}
+
+/// Since the last frame line: the calls and bytes of each path, two counters
+/// a path. The run at 21:38 wrote 23 GB into title memory in five seconds
+/// while the frame line's "copying back" said 30-90 MB a frame - so one of
+/// these paths writes far more than the callers count, and this line says
+/// which (section 39 of the notes).
+pub(crate) static WRITES_BY: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+
+/// [`crate::host::write_mapped`] by one of the paths, counted.
+pub(crate) fn write_back(by: WriteBy, dst: *mut u8, src: *const u8, len: usize) {
+    let i = by as usize * 2;
+    WRITES_BY[i].fetch_add(1, Ordering::Relaxed);
+    WRITES_BY[i + 1].fetch_add(len as u64, Ordering::Relaxed);
+    crate::host::write_mapped(dst, src, len);
+}
+
+/// For the frame line: what each path wrote per frame (calls, megabytes).
+pub(crate) fn writes_line(frames: f64) {
+    let w: Vec<f64> = WRITES_BY.iter().map(|c| c.swap(0, Ordering::Relaxed) as f64 / frames).collect();
+    if w.iter().all(|&v| v == 0.0) {
+        return;
+    }
+    tracing::info!(
+        "what shaders wrote into title memory per frame, by the path that did it: the CPU's compare back {:.0} calls {:.1} MB, \
+         the relay's merge {:.0} calls {:.1} MB, the card's merge {:.0} calls {:.1} MB, the card's relay merge {:.0} calls {:.1} MB",
+        w[0],
+        w[1] / 1e6,
+        w[2],
+        w[3] / 1e6,
+        w[4],
+        w[5] / 1e6,
+        w[6],
+        w[7] / 1e6
+    );
+}
+
 /// With [`wide_back`]: for each of `work` (a copy not in the card's memory
 /// and a range `[address, end)` its shaders may have written, declared and
 /// not yet done), the 64 KiB pieces that differ from the snapshot, as
@@ -2568,7 +2618,7 @@ impl Shadow {
                 // stretch is the title's as read, and a title write landing
                 // there since stays.
                 for &(off, len) in &runs {
-                    crate::host::write_mapped((start + at + off) as *mut u8, title[off..].as_ptr(), len);
+                    write_back(WriteBy::Cpu, (start + at + off) as *mut u8, title[off..].as_ptr(), len);
                     written += len;
                 }
             }
@@ -2665,7 +2715,7 @@ impl Shadow {
         }
         crate::watch::writing(start + at, n);
         merge_race(as_read.as_deref(), (self.start, self.len), start + at, &title[..], "pc relay");
-        crate::host::write_mapped((start + at) as *mut u8, title.as_ptr(), n);
+        write_back(WriteBy::Relay, (start + at) as *mut u8, title.as_ptr(), n);
         n
     }
 
@@ -3337,7 +3387,7 @@ impl Shadow {
                 crate::host::shaders_write(start + at, &title[..]);
                 crate::watch::writing(start + at, n);
                 merge_race(as_read.as_deref(), (self.start, self.len), start + at, &title[..], "card");
-                crate::host::write_mapped((start + at) as *mut u8, title.as_ptr(), n);
+                write_back(WriteBy::Card, (start + at) as *mut u8, title.as_ptr(), n);
                 written = n;
             }
         } else {
@@ -3420,7 +3470,7 @@ impl Shadow {
         }
         crate::watch::writing(start + at, n);
         merge_race(as_read.as_deref(), (self.start, self.len), start + at, &title[..], "card relay");
-        crate::host::write_mapped((start + at) as *mut u8, title.as_ptr(), n);
+        write_back(WriteBy::CardRelay, (start + at) as *mut u8, title.as_ptr(), n);
         n
     }
 }
