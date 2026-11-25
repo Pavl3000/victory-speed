@@ -137,6 +137,10 @@ reverted by exactly that - opening memory ranges instead of the kernel write cos
 13 ms a MB against 0.6, and raising the merge cap made a wait *worse*; both were
 in the log an hour after they went in.
 
+The full chronology - each run, what the log said, what was concluded, what was
+changed, and the conclusions that turned out wrong - is in
+**[docs/performance-log.md](docs/performance-log.md)**.
+
 ## What is left, measured
 
 ```
