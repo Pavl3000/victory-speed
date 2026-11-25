@@ -3435,7 +3435,7 @@ fn late_line(frames: f64) {
     let s: Vec<f64> = LATE_STATS.iter().map(|s| s.swap(0, Ordering::Relaxed) as f64 / frames).collect();
     tracing::info!(
         "submissions sent ahead per frame: {:.1} in {:.1} settles ({:.1} flights each time), {:.1} ms waiting for the card in them; \
-         settled for: a synchronous submission or present {:.1}, the card had run them {:.1}, a wait for a memory value {:.1}, \
+         settled for, times a frame (milliseconds in the line after this one): a synchronous submission or present {:.1}, the card had run them {:.1}, a wait for a memory value {:.1}, \
          title memory changed under shader writes {:.1}, title memory read {:.1} (by a buffer copy {:.1}, a fill of upload memory {:.1}, \
          a texture {:.1}), a step of ours {:.1}, {} lists in the air {:.1}, \
          bottom-of-pipe writes (VICTORY_LATE_WAIT_WRITES=0) {:.1}, a blocking fence wait {:.1}; \
@@ -7332,15 +7332,38 @@ pub(crate) fn write_mapped(dst: *mut u8, src: *const u8, len: usize) {
         // destination.
         unsafe { WriteProcessMemory(GetCurrentProcess(), at as _, from.cast(), n, &mut done) != 0 }
     };
-    if len == 0 || write(dst as usize, len) {
+    if len == 0 {
         return;
     }
     // A page of the range will not take a kernel write (a guard of ours, or a
     // page not committed). The kernel route below drills from 64 KiB pieces to
     // 4 KiB pages, and a page a call is 8.6 us: 14 437 pages a frame was 124 ms
     // (section 26). Opening a piece and copying it with the processor is a
-    // microsecond's work for the same bytes, so that comes first.
-    if open_copies() {
+    // microsecond's work for the same bytes.
+    // What the runs at 20:54 and 21:08 measured: putting back 37.9 MB cost
+    // 90.4 ms (0.42 GB/s) - the kernel write, 242 pieces, 0.37 ms a piece -
+    // while a processor copy moves the same bytes at several GB/s. So with
+    // `VICTORY_OPEN_COPIES=2` a piece is opened and copied first and the
+    // kernel's write is what is left for pieces that are no one committed
+    // region; `=1` (the default) keeps the kernel's write first and opens only
+    // where it fails; `=0` takes the kernel's route only.
+    let mode = open_copies();
+    if mode == 2 {
+        let base = dst as usize;
+        let mut done = true;
+        for_pieces(base, len, 64 << 10, |at, n| {
+            if !open_and_copy(at, n, src, base) {
+                done = false;
+            }
+        });
+        if done {
+            return;
+        }
+    }
+    if write(dst as usize, len) {
+        return;
+    }
+    if mode == 1 {
         let base = dst as usize;
         let mut done = true;
         for_pieces(base, len, 64 << 10, |at, n| {
@@ -7361,11 +7384,17 @@ pub(crate) fn write_mapped(dst: *mut u8, src: *const u8, len: usize) {
     });
 }
 
-/// Whether a stretch that will not take one kernel write is opened and copied
-/// instead (`VICTORY_OPEN_COPIES=0` keeps the kernel-only path).
-fn open_copies() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_OPEN_COPIES").is_none_or(|v| v != "0"))
+/// How a stretch that the card wrote goes back: 0, the kernel's write only;
+/// 1, the kernel's write first and an opened copy where it fails (the
+/// default); 2, an opened copy first and the kernel's write where a piece is
+/// not one committed region (`VICTORY_OPEN_COPIES=2`).
+fn open_copies() -> u8 {
+    static MODE: OnceLock<u8> = OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("VICTORY_OPEN_COPIES").as_deref() {
+        Ok("0") => 0,
+        Ok("2") => 2,
+        _ => 1,
+    })
 }
 
 /// Opens `[at, at + n)` for writing, copies `n` bytes from `src` into it, and
