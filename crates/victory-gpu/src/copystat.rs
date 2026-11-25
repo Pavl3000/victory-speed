@@ -76,8 +76,21 @@ pub(crate) enum C {
     UntilRecordUs,
     UntilSubmitUs,
     TailUs,
-    /// Resetting host lists (`HostList::reset`).
+    /// Resetting host lists (`HostList::reset`): all of it, then what each
+    /// part of it took - the allocator's reset, the command list's, the maps
+    /// and sets let go, the deferred work let go, the scratch chunks given
+    /// back. (A frame resets some 250 lists; the parts tell which to look at.)
     ResetNs,
+    ResetAllocNs,
+    ResetListNs,
+    ResetStatesNs,
+    ResetDeferNs,
+    /// Of `ResetStatesNs`, what only the diagnostics build holds per list: a
+    /// `String` per noted command and the set of pipeline names. A release
+    /// build has neither, so this part of the 130 ms is an artefact of the
+    /// measuring.
+    ResetNotesNs,
+    ResetScratchNs,
     /// What shaders wrote: finding the 64 KiB pieces that differ, how many
     /// do, and putting them into title memory.
     BackScanUs,
@@ -134,7 +147,7 @@ pub(crate) enum C {
     /// already known to be guarded view memory (no kernel call).
     WatchKnownView,
 }
-const COUNTERS: usize = 80;
+const COUNTERS: usize = 86;
 static COUNT: [AtomicU64; COUNTERS] = [const { AtomicU64::new(0) }; COUNTERS];
 
 pub(crate) fn add(c: C, n: u64) {
@@ -1172,7 +1185,7 @@ pub(crate) fn log(frames: f64) {
     tracing::info!(
         "frame account per frame: after a present {:.1} ms until the first list call and {:.1} ms \
          until the first submission; {:.1} ms from the last submission to the present call; \
-         lists reset in {:.1} ms; the process ran {user:.0} ms user + {kernel:.0} ms kernel on \
+         lists reset in {:.1} ms ({:.1} deferred, {:.1} maps and sets, {:.1} notes only a diagnostics build keeps, {:.1} scratch, {:.1} allocator, {:.1} command list); the process ran {user:.0} ms user + {kernel:.0} ms kernel on \
          all threads; what shaders wrote: {:.1} ms finding {:.0} pieces that differ, {:.1} ms \
          putting them back; texture uploads: {:.0} recorded, {:.0} left out; {:.1} held \
          submissions run at the present with their waits not met; waits for memory values: \
@@ -1182,6 +1195,12 @@ pub(crate) fn log(frames: f64) {
         ms(c[C::UntilSubmitUs as usize]),
         ms(c[C::TailUs as usize]),
         c[C::ResetNs as usize] / 1e6,
+        c[C::ResetDeferNs as usize] / 1e6,
+        c[C::ResetStatesNs as usize] / 1e6,
+        c[C::ResetNotesNs as usize] / 1e6,
+        c[C::ResetScratchNs as usize] / 1e6,
+        c[C::ResetAllocNs as usize] / 1e6,
+        c[C::ResetListNs as usize] / 1e6,
         ms(c[C::BackScanUs as usize]),
         c[C::BackDiffer as usize],
         ms(c[C::BackSyncUs as usize]),

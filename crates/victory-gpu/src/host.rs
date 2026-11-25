@@ -1974,6 +1974,25 @@ struct Deferred {
 }
 
 impl Deferred {
+    /// What a reset leaves: every container emptied, its memory kept for the
+    /// next recording (a frame resets some 250 lists, and a fresh `Deferred`
+    /// for each was nine allocations and frees every frame). The upload
+    /// memory's count in [`ALIVE`] is given back here, as [`Drop`] does.
+    fn clear(&mut self) {
+        ALIVE[6].fetch_sub(self.uploads.len() as u64, Ordering::Relaxed);
+        ALIVE[7].fetch_sub(self.upload_bytes, Ordering::Relaxed);
+        self.uploads.clear();
+        self.upload_bytes = 0;
+        self.copies.clear();
+        self.kept.clear();
+        self.refreshed.clear();
+        self.textures.clear();
+        self.writes.clear();
+        self.backs.clear();
+        self.budget_zeroed = false;
+        self.indirect_readable = 0;
+    }
+
     /// Holds `buffer` (`size` bytes of upload memory) until the list is
     /// reset.
     fn hold_upload(&mut self, buffer: ID3D12Resource, size: u64) {
@@ -6034,13 +6053,31 @@ impl HostList {
     pub(crate) fn reset(&self) {
         #[cfg(feature = "diagnostics")]
         let started = std::time::Instant::now();
+        // Which part of a reset the frame's 130 ms goes to: the deferred work
+        // let go, the maps and sets, the scratch chunks, the allocator's
+        // reset, the command list's.
+        #[cfg(feature = "diagnostics")]
+        let part = std::cell::Cell::new(std::time::Instant::now());
+        #[cfg(feature = "diagnostics")]
+        let lap = |c: crate::copystat::C| {
+            crate::copystat::add(c, part.replace(std::time::Instant::now()).elapsed().as_nanos() as u64);
+        };
         self._alive.used();
-        *self.deferred() = Deferred::default();
+        // Emptied in place, their memory kept: a frame resets some 250 lists,
+        // and a fresh `Deferred` for each was nine allocations and frees.
+        self.deferred().clear();
+        #[cfg(feature = "diagnostics")]
+        lap(crate::copystat::C::ResetDeferNs);
         self.states.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.twins.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.pipelines.lock().unwrap_or_else(|e| e.into_inner()).clear();
         #[cfg(feature = "diagnostics")]
-        self.notes.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        lap(crate::copystat::C::ResetStatesNs);
+        #[cfg(feature = "diagnostics")]
+        {
+            self.notes.lock().unwrap_or_else(|e| e.into_inner()).clear();
+            lap(crate::copystat::C::ResetNotesNs);
+        }
         {
             let mut scratch = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
             (scratch.current, scratch.used) = (0, 0);
@@ -6050,12 +6087,15 @@ impl HostList {
                 give_chunks(std::mem::take(&mut scratch.chunks));
             }
         }
+        #[cfg(feature = "diagnostics")]
+        lap(crate::copystat::C::ResetScratchNs);
         // SAFETY: the list is not executing.
-        let reset = unsafe {
-            self.allocator
-                .Reset()
-                .and_then(|()| self.list.Reset(&self.allocator, None))
-        };
+        let reset = unsafe { self.allocator.Reset() };
+        #[cfg(feature = "diagnostics")]
+        lap(crate::copystat::C::ResetAllocNs);
+        let reset = reset.and_then(|()| unsafe { self.list.Reset(&self.allocator, None) });
+        #[cfg(feature = "diagnostics")]
+        lap(crate::copystat::C::ResetListNs);
         if let Err(e) = reset {
             fail(format_args!("a host command list did not reset ({e})"));
         }
