@@ -7289,13 +7289,35 @@ fn direct_writes() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_DIRECT_WRITES").is_none_or(|v| v != "0"))
 }
 
+/// Calls into [`write_mapped`] and kernel writes they issued, since the last
+/// frame line, with the bytes written. One call is one stretch of what shaders
+/// wrote; a call that cannot go in one write drills down to 64 KiB pieces and
+/// then 4 KiB pages, so the second number being far above the first is the
+/// measured shape of the copy-back: 14 437 pages a frame at 8.6 us is 124 ms.
+pub(crate) static WRITE_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static WRITE_SYSCALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static WRITE_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Takes the three for the frame line and starts them again.
+pub(crate) fn take_write_counts() -> (u64, u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (
+        WRITE_CALLS.swap(0, Relaxed),
+        WRITE_SYSCALLS.swap(0, Relaxed),
+        WRITE_BYTES.swap(0, Relaxed),
+    )
+}
+
 /// Copies host memory into title memory after a submission (what shaders
 /// wrote), leaving pages that are not mapped alone.
 pub(crate) fn write_mapped(dst: *mut u8, src: *const u8, len: usize) {
+    WRITE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    WRITE_BYTES.fetch_add(len as u64, std::sync::atomic::Ordering::Relaxed);
     use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
     let direct = direct_writes();
     let write = |at: usize, n: usize| {
+        WRITE_SYSCALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let from = src.wrapping_add(at - dst as usize);
         let mut done = 0;
         if direct {

@@ -1084,6 +1084,11 @@ fn present_now(this: This, planes: u32, plane_parameters: *const Plane) -> HRESU
         // resource barrier and a root/heap rebind are the two things that can
         // turn a microsecond command into tens of microseconds.
         let (barriers, rebinds) = crate::host::take_record_counts();
+        // How the copy-back reached title memory: calls (one stretch of what
+        // shaders wrote each), kernel writes (one a piece when a stretch would
+        // not go in one), and the bytes. A second number far above the first
+        // is the per-page drill-down that costs 8.6 us a page.
+        let (write_calls, write_syscalls, write_mb) = crate::host::take_write_counts();
         #[cfg(windows)]
         let (drawn, dispatched) = {
             static DRAWN: AtomicU64 = AtomicU64::new(0);
@@ -1116,6 +1121,9 @@ fn present_now(this: This, planes: u32, plane_parameters: *const Plane) -> HRESU
             barriers = barriers,
             rebinds = rebinds,
             asked_mpx,
+            write_calls,
+            write_syscalls,
+            write_mb,
             "frame presented (since the last line: draws and dispatches, and those run on the host)"
         );
         #[cfg(windows)]
