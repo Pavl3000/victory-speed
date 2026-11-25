@@ -19,7 +19,7 @@ the game. Not affiliated with or endorsed by its developer or publisher.
 
 ## Status: measured, not guessed
 
-Machine: Ryzen 9 5950X, Radeon RX 9070 XT (16 GB), 32 GB RAM, Windows 11.
+Machine: Ryzen 9 5950X, GeForce RTX 3080 Ti (12 GB), 32 GB RAM, Windows 11.
 
 | | before this branch | after |
 |---|---|---|
@@ -119,6 +119,61 @@ powershell -ExecutionPolicy Bypass -File scripts\play.ps1 -Game "<your game fold
 | `VICTORY_HEAP_TEXTURE_SKIP=0` | walk every heap slot every frame, as before |
 | `VICTORY_RELAY=2`, `VICTORY_LATE_WAIT_LISTS=256` | the copy-back on a thread of its own; how many host lists may be in the air |
 | `VICTORY_GPU_TIMING=1`, `VICTORY_D3D12_DRED=1`, `VICTORY_SLOW_LIST_MS=200` | the per-command profile (diagnostics build only) |
+
+## How the numbers were made (so they can be repeated)
+
+No GPU profiler was used. Three instruments in the layer gave everything above,
+and they are all plain log lines:
+
+| instrument | switch | what it gives |
+|---|---|---|
+| the frame line, every 5 s | `VICTORY_FRAME_LOG=1` | fps, ms a frame, and its split: `preparing` (copies, textures), `on the GPU`, `copying back`; draws, dropped draws, the texture queue |
+| the per-command profile | diagnostics build, `VICTORY_GPU_TIMING=1 VICTORY_D3D12_DRED=1 VICTORY_SLOW_LIST_MS=200` | "the card's time by command (timing run)": each command kind - indirect, dispatch, draw, texture upload, barrier - with its commands a frame and its milliseconds, and the heaviest forty named by pipeline |
+| the counters this branch added | none (always on) | `write_calls/write_syscalls/write_mb` and the writes by path; `our clamps ... per frame`; `reuploaded=` with its three causes; `lists reset` split into its parts with what each let go |
+
+The rule that made the difference: **read one number, change one thing, read the
+same number again.** Twice in this work a change that "should" have helped was
+reverted by exactly that - opening memory ranges instead of the kernel write cost
+13 ms a MB against 0.6, and raising the merge cap made a wait *worse*; both were
+in the log an hour after they went in.
+
+## What is left, measured
+
+```
+128.8 ms a frame = preparing 53.0 (copies 27.5 / 117.9 MB, textures 12.2 / 47.6 MB)
+                 + the card 29.1
+                 + copying back 18.0 / 27.6 MB
+                 + ~28 ms of waiting (WHY_STALE: the next frame reads what the
+                   previous frame's shaders wrote, and the layer must land those
+                   flights first)
+```
+
+The copies run at **4.3 GB/s** - memcpy speed - and their 80-120 MB a frame are
+the title's own changed memory, so there is nothing to shave there; the two
+things that would move the frame now are structural: uploads on a second (copy)
+queue overlapped with the render, and the read-after-shader-write round trip
+that a console does not pay. The one prepared and unmeasured lever is
+`VICTORY_INDIRECT_MERGE=1` (one `ExecuteIndirect` per run of records): it is
+written, its ordering bug is fixed, and it has not been in a run since.
+
+## The preset this fork plays with
+
+```bat
+set VICTORY_RELAY=2
+set VICTORY_LATE_WAIT_LISTS=256
+set VICTORY_CARD_FETCH_INFLIGHT=1
+set VICTORY_CARD_FETCH_INFLIGHT_MB=128
+set VICTORY_INDIRECT_WINDOW=1
+set VICTORY_INDIRECT_WINDOW_RECORDS=64
+set VICTORY_TEXTURE_CATCHUP=0
+set VICTORY_TEXTURE_STAGE_MS=100
+set VICTORY_TEXTURE_STAGE_MB=96
+set VICTORY_TEXTURE_BUDGET_MB=10240
+set VICTORY_CARD_BUFFERS_MB=2048
+set VICTORY_OPEN_COPIES=1
+set VICTORY_BACK_GAP=16
+set VICTORY_MERGE_RUNS=512
+```
 
 ## Credits and references
 
