@@ -1,0 +1,61 @@
+diff a/crates/victory-shader/src/emit/shader.rs b/crates/victory-shader/src/emit/shader.rs	(rejected hunks)
+@@ -1055,6 +1077,8 @@ mod tests {
+             static_samplers: Vec::new(),
+             root_cbvs: Vec::new(),
+             root_uavs: Vec::new(),
++            written_root_uavs: Vec::new(),
++            writes_guest_memory: false,
+             root_indexed_views: Vec::new(),
+         };
+         let data = [0x1020_3040, 0x100, 320, 20, 0x5060_7080, 0x200, 768, 24];
+@@ -1088,6 +1112,50 @@ mod tests {
+             half: false,
+         }
+     }
++    #[test]
++    fn only_the_written_root_uavs_need_a_guest_writeback() {
++        let mut s = Shader::new(false);
++        let input = s.root_uav_handle(1);
++        let output = s.root_uav_handle(2);
++        let counter = s.root_uav_handle(3);
++        let (zero, one, mask, align) = (s.m.i32(0), s.m.i32(1), s.m.i8(1), s.m.i32(4));
++        let undef = s.m.undef(s.t.i32);
++        for handle in [input, output] {
++            s.op(
++                s.entry,
++                "rawBufferLoad.f32",
++                Attr::ReadOnly,
++                s.t.res_ret,
++                139,
++                &[handle, zero, undef, mask, align],
++            );
++        }
++        s.op(
++            s.entry,
++            "rawBufferStore.i32",
++            Attr::NoUnwind,
++            s.t.void,
++            140,
++            &[output, zero, undef, one, undef, undef, undef, mask, align],
++        );
++        s.op(
++            s.entry,
++            "atomicBinOp.i32",
++            Attr::NoUnwind,
++            s.t.i32,
++            78,
++            &[counter, zero, zero, undef, undef, one],
++        );
++        s.op(
++            s.entry,
++            "atomicCompareExchange.i32",
++            Attr::NoUnwind,
++            s.t.i32,
++            79,
++            &[counter, zero, undef, undef, zero, one],
++        );
++        assert_eq!(s.written_root_uavs, [2, 3]);
++    }
+ 
+     #[test]
+     fn reconcile_row_interp_matches_constant_and_used_siblings() {

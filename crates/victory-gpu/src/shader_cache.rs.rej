@@ -1,0 +1,19 @@
+diff a/crates/victory-gpu/src/shader_cache.rs b/crates/victory-gpu/src/shader_cache.rs	(rejected hunks)
+@@ -174,7 +174,7 @@ fn cached(
+     (converter.translate)(container).map(|shader| (shader, Outcome::Unstored))
+ }
+ 
+-const MAGIC: &[u8; 4] = b"VSH1";
++const MAGIC: &[u8; 4] = b"VSH3";
+ const STAGES: [HwStage; 8] = [
+     HwStage::Ls,
+     HwStage::Hs,
+@@ -410,7 +421,7 @@ mod tests {
+ 
+         // A damaged entry is a miss, translated and stored again.
+         for e in walk(dir.path()) {
+-            std::fs::write(e, b"VSH1 broken").unwrap();
++            std::fs::write(e, b"VSH3 broken").unwrap();
+         }
+         assert_eq!(
+             cached(&cache, &build, container, translate),

@@ -69,6 +69,12 @@ pub const USER_VIEW_ADDRESS: u32 = 0x101;
 /// view. Asked for every root UAV, and for the root SRVs of programs with
 /// a spilled user-data table.
 pub const USER_VIEW_BIAS: u32 = 0x103;
+/// `RootType::Other` code of a user-data dword the host computes: the
+/// actual X thread count of a one-dimensional partial dispatch. Zero keeps
+/// every thread of every dispatched group active; otherwise threads whose
+/// global X index is at or past it do nothing. The metadata `dword` holds
+/// the group's X width.
+pub const USER_DISPATCH_THREADS_X: u32 = 0x104;
 
 /// `ShaderFlags` bits (metadata) and their `SFI0` feature bits.
 pub(crate) mod flags {
@@ -154,6 +160,10 @@ pub(crate) struct Shader {
     pub root_srvs: Vec<(u8, V)>,
     /// Root UAVs (raw buffers) read or written, likewise.
     pub root_uavs: Vec<(u8, V)>,
+    /// Root UAV slots through which an emitted operation may write.
+    pub written_root_uavs: Vec<u8>,
+    /// A translated store or atomic can write through the guest page directory.
+    pub writes_guest_memory: bool,
     pub flags: u64,
     /// Heap handles made with a non-uniform index.
     pub nonuniform_handles: u32,
@@ -211,6 +221,8 @@ impl Shader {
             root_cbvs: Vec::new(),
             root_srvs: Vec::new(),
             root_uavs: Vec::new(),
+            written_root_uavs: Vec::new(),
+            writes_guest_memory: false,
             flags: 0,
             nonuniform_handles: 0,
             threads: None,
@@ -244,6 +256,16 @@ impl Shader {
         opcode: u32,
         args: &[V],
     ) -> V {
+        // Raw root UAVs are also legal inputs. Only a read through a handle
+        // is known to leave it unchanged; any other use, including atomics,
+        // is treated conservatively.
+        if !matches!(opcode, 68 | 72 | 139) // BufferLoad, GetDimensions, RawBufferLoad
+            && let Some(first) = args.first()
+            && let Some(&(slot, _)) = self.root_uavs.iter().find(|(_, h)| h == first)
+            && !self.written_root_uavs.contains(&slot)
+        {
+            self.written_root_uavs.push(slot);
+        }
         let mut params = vec![self.t.i32];
         params.extend(args.iter().map(|&a| self.m.type_of(a)));
         let fty = self.m.func_ty(ret, params);

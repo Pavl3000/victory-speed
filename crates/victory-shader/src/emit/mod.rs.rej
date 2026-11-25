@@ -1,0 +1,10 @@
+diff a/crates/victory-shader/src/emit/mod.rs b/crates/victory-shader/src/emit/mod.rs	(rejected hunks)
+@@ -115,7 +115,7 @@ pub use rect::rect_list_gs;
+ pub use shader::{
+     MEMORY_FAULTS, MEMORY_PAGES, ROOT_CBV_SPACE, SAMPLER_SPACE, SLOT_FAULTS, SLOT_MEMORY, SLOT_STRIDES,
+     SLOT_STRIDES_COUNT, SLOT_VIEW_BYTES, SLOT_VIEWS, SLOT_VIEWS_COUNT, USER_DATA_SPACE,
+-    USER_MEMORY_BASE, USER_VIEW_ADDRESS, USER_VIEW_BIAS,
++    USER_DISPATCH_THREADS_X, USER_MEMORY_BASE, USER_VIEW_ADDRESS, USER_VIEW_BIAS,
+     set_view_heap_limit, view_heap_limit,
+ };
+ 
