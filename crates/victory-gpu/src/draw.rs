@@ -3284,6 +3284,11 @@ impl State {
                 // own and copies clamped active records into a scratch
                 // buffer at offset 0.
                 let count_arg = counter.as_ref().map(|(s, at)| (&s.buffer, s.offset(*at)));
+                // The clamp writes into a scratch buffer, and a run still
+                // waiting to be drawn may lie in that very one: draw it first
+                // (`VICTORY_INDIRECT_MERGE`), or its records would be the ones
+                // the clamp is about to write.
+                self.flush_indirect(list);
                 // More than the record asked for: a window clamped ahead,
                 // whose unfilled slots must not spend the list's budget.
                 let bounded = if windowed && records > 1 {
